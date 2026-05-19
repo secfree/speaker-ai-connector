@@ -16,9 +16,8 @@ A small macOS app — **Speaker AI Connector** — that runs in the background, 
 
 1. Launches the configured AI app (foreground).
 2. Starts a new conversation session in voice mode.
-3. (Optional) Returns the AI app to background / minimizes other windows so nothing else is visible.
 
-When the speaker disconnects, the app optionally ends the session and quits / hides the AI app.
+When the speaker disconnects, the app ends the session.
 
 ## User flow
 
@@ -86,10 +85,9 @@ Stored in `UserDefaults` (single-user Mac, no need for a file format):
 - `targetDeviceAddress: String` — Bluetooth MAC.
 - `targetAppBundleID: String`.
 - `launchOnLogin: Bool`.
-- `quitAppOnDisconnect: Bool`.
 - `debounceSeconds: Int` — default 5.
 
-UI is a single settings window: device picker (lists paired devices), app picker (lists installed apps that match a known profile), two toggles, a "Test now" button that simulates a connect.
+UI is a single settings window: device picker (lists paired devices), app picker (lists installed apps that match a known profile), a "Start at login" toggle, a "Test now" button that simulates a connect.
 
 ## Permissions required
 
@@ -114,7 +112,7 @@ UI is a single settings window: device picker (lists paired devices), app picker
 2. **Audio routing.** macOS sometimes does not auto-switch the system output to a freshly connected Bluetooth speaker. May need to force-set the default output device via CoreAudio when the speaker connects. Verify on the actual hardware before assuming the OS handles it.
 3. **Voice activation in the AI app.** Some apps require a manual tap to start listening even after a new session is opened. If that's true for the chosen app, the keystroke profile must include the "start voice" shortcut, and if no such shortcut exists, the design breaks. Confirm per app before promising v1 support.
 4. **Speaker auto-reconnect reliability.** If the speaker fails to auto-connect on power-on, the child is stuck. This is a Bluetooth-stack problem, not something this app can fix — document the working speaker models.
-5. **Session boundaries.** Should disconnect end the AI conversation or leave it open? Leaving it open means the next "connect" continues the same chat (possibly confusing); ending it loses context. Default to ending on disconnect, make it a setting.
+5. **Session boundaries.** Disconnect always ends the AI conversation. This loses context across sessions but avoids the next "connect" silently continuing an old chat, which would be more confusing for a child.
 
 ## Milestones
 
