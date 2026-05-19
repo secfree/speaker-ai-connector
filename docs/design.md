@@ -8,26 +8,30 @@ Let children access AI freely with voice, without a screen.
 
 Children should be able to talk to an AI assistant on demand, but giving them a phone or computer is undesirable — they will drift into games or videos. A Bluetooth speaker paired to a Mac is screen-free and limited to audio, which fits the constraint.
 
-The remaining gap: when the speaker turns on and connects to the Mac, an adult still has to walk to the Mac, open the AI app, and start a new conversation session. The child cannot do that themselves, which defeats the "free access" goal.
+The remaining gap: when the speaker turns on and connects to the Mac, an adult still has to walk to the Mac, open the AI's voice mode, and start a new conversation. The child cannot do that themselves, which defeats the "free access" goal.
 
 ## Solution
 
 A small macOS app — **Speaker AI Connector** — that runs in the background, watches for a specific Bluetooth speaker connecting, and on connect automatically:
 
-1. Launches the configured AI app (foreground).
-2. Starts a new conversation session in voice mode.
+1. Opens the configured AI service's web page in a browser (foreground).
+2. Triggers voice mode on the page so the child can immediately start talking.
 
-When the speaker disconnects, the app ends the session.
+When the speaker disconnects, the app ends the session (closes the tab / window).
+
+### Why browser, not native app
+
+The native ChatGPT and Claude macOS apps **do not expose voice mode** (verified 2026-05). Voice is only available on their web pages (`chatgpt.com`, `claude.ai`). That forces a browser-based approach for v1. If a native app later ships voice mode, swapping to it is just a new profile — the architecture stays the same.
 
 ## User flow
 
-1. Parent installs Speaker AI Connector on the Mac and grants the required permissions (Bluetooth, Accessibility, Automation).
-2. Parent opens the app once, picks the target speaker from a list of paired Bluetooth devices, picks the target AI app, and sets "Start at login".
+1. Parent installs Speaker AI Connector on the Mac and grants the required permissions (Bluetooth, Automation for the browser, optionally Accessibility).
+2. Parent opens the app once, picks the target speaker from a list of paired Bluetooth devices, picks the target AI service (ChatGPT web / Claude web), signs in to that service in the chosen browser once so the session cookie sticks, grants the browser microphone permission once, and sets "Start at login".
 3. Parent closes the app — it keeps running in the menu bar.
 4. Child powers on the speaker. The speaker auto-connects to the Mac (standard Bluetooth pairing behavior).
-5. Speaker AI Connector detects the connection, opens the AI app, starts a new voice session.
+5. Speaker AI Connector detects the connection, opens the AI service's URL in the browser, and clicks the voice button on the page.
 6. Child talks; AI responds through the speaker.
-7. Child powers off the speaker. Speaker AI Connector detects disconnect and tears the session down.
+7. Child powers off the speaker. Speaker AI Connector detects disconnect and tears the session down (closes the tab or window).
 
 ## Architecture
 
@@ -42,82 +46,95 @@ Uses **IOBluetooth** (`IOBluetoothDevice` + `IOBluetoothDeviceInquiry` is not ne
 
 Filter on the configured device's MAC address. Fires `onSpeakerConnected` / `onSpeakerDisconnected` events.
 
-### 2. AI app launcher
+### 2. Browser launcher
 
-Two cooperating strategies, picked per configured AI app:
-
-- **URL scheme / deep link** (preferred when supported). Example: `claude://new-session?mode=voice`. Most reliable, no Accessibility permission needed.
-- **UI scripting fallback** via `NSAppleScript` / Accessibility API: launch the app with `NSWorkspace.shared.openApplication`, then send the "new conversation" keyboard shortcut (e.g. ⌘N) and the "start voice" shortcut to the frontmost window.
-
-Each supported AI app is described by an `AIAppProfile`:
+Opens the AI service's URL in a chosen browser, then runs an in-page script to start voice mode. Each supported service is described by an `AIServiceProfile`:
 
 ```swift
-struct AIAppProfile {
-    let bundleID: String
-    let displayName: String
-    let newSessionStrategy: NewSessionStrategy  // .urlScheme(URL) or .keystrokes([Keystroke])
-    let voiceModeStrategy: VoiceModeStrategy?   // optional follow-up to enter voice mode
+struct AIServiceProfile {
+    let id: String                 // e.g. "chatgpt-web"
+    let displayName: String        // e.g. "ChatGPT (web)"
+    let url: URL                   // e.g. https://chatgpt.com/
+    let voiceTrigger: VoiceTrigger // JS snippet (and selector) that clicks the voice button
+    let signedInProbe: JSProbe     // JS that returns true iff the user is signed in
 }
 ```
 
-**v1 target: ChatGPT macOS.** Chosen first because its voice mode is the most mature of the desktop AI apps. Profile is a plain struct, easy to add more later (Claude macOS is the likely v2 target).
+The browser is configured separately (`browserBundleID`) so the same service profile works in Safari or Chrome.
 
-### ChatGPT profile — specifics to verify on the actual app before coding
+Two execution paths, picked by browser:
 
-These are the unknowns that decide whether the keystroke strategy works. Each must be confirmed against the installed app, not assumed:
+- **Safari** (v1): AppleScript via `NSAppleScript` — `tell application "Safari" to do JavaScript ...` against the opened tab. Requires "Allow JavaScript from Apple Events" enabled in Safari's Develop menu — surface this in the settings UI with a one-click "How to enable" link.
+- **Chrome** (v2): AppleScript via `NSAppleScript` — `tell application "Google Chrome" to execute ... javascript ...`. Equivalent capability, different syntax.
 
-- Bundle ID (likely `com.openai.chat`).
-- "New chat" shortcut — `⌘N` is the standard guess, confirm.
-- "Start voice mode" shortcut — ChatGPT exposes a voice button; whether there is a keyboard shortcut, and what it is, must be checked in the app's menu bar. If there is no shortcut, fall back to an Accessibility-API click on the voice button by its AX identifier.
-- Whether launching the app via `NSWorkspace.openApplication` reliably brings a window forward, or whether the app starts hidden in the menu bar (ChatGPT runs as a menu-bar app by default — may need to send the global "summon" shortcut, default `⌥Space`, instead of relying on window focus).
-- Whether a URL scheme exists (`chatgpt://`?) that opens a new chat directly. If so, prefer it over keystrokes.
+The voice trigger itself is a short JS snippet that finds the voice button by a stable selector (e.g. `aria-label`) and clicks it, with a small `MutationObserver`-based wait in case the button mounts asynchronously. Selectors live in the profile, not in code, so a site UI change is a profile update.
+
+**v1 target: ChatGPT web in Safari.** ChatGPT first because its voice UX is the most mature web voice mode. Safari first because of its tighter AppleScript / Accessibility integration on macOS and no third-party install requirement. Claude web and Chrome are v2.
+
+### ChatGPT web profile — specifics to verify before coding
+
+These are the unknowns that decide whether the JS-click strategy works. Each must be confirmed against the live page, not assumed:
+
+- Stable selector for the voice button (`aria-label`, `data-testid`, or similar). Inspect the page; record the exact selector.
+- Whether the voice button is visible immediately on page load or only after the chat input mounts — may need a `MutationObserver` wait in the snippet.
+- Whether a URL parameter (e.g. `?voice=1`) can land directly in voice mode, removing the click step.
+- Whether the session cookie persists across Safari restarts and across machine reboots (it should, but verify; otherwise the child hits a login screen).
+- Whether Safari's "Allow JavaScript from Apple Events" must be on, and how to detect that it's off so we can surface an actionable error.
 
 ### 3. Coordinator
 
-Glue: subscribes to the watcher, looks up the active `AIAppProfile`, runs the launch strategy, and exposes status in the menu bar (idle / connected / launching / session active / error).
+Glue: subscribes to the watcher, looks up the active `AIServiceProfile` + browser, opens the URL, runs the voice trigger, and exposes status in the menu bar (idle / connected / launching / session active / error).
 
 Debounce: ignore reconnect events within N seconds of the last connect to avoid double-launching when Bluetooth briefly drops.
+
+On disconnect: close the tab (or the window if it's the only tab) via AppleScript, so the next connect starts fresh.
 
 ## Configuration
 
 Stored in `UserDefaults` (single-user Mac, no need for a file format):
 
 - `targetDeviceAddress: String` — Bluetooth MAC.
-- `targetAppBundleID: String`.
+- `targetServiceID: String` — which `AIServiceProfile` to use.
+- `browserBundleID: String` — `com.apple.Safari` in v1.
 - `launchOnLogin: Bool`.
+- `closeTabOnDisconnect: Bool` — default true.
 - `debounceSeconds: Int` — default 5.
 
-UI is a single settings window: device picker (lists paired devices), app picker (lists installed apps that match a known profile), a "Start at login" toggle, a "Test now" button that simulates a connect.
+UI is a single settings window: device picker (lists paired devices), service picker (lists known profiles), browser picker (Safari only in v1, plumbed through for v2), a "Start at login" toggle, and a "Test now" button that simulates a connect.
 
 ## Permissions required
 
 | Permission | Why | How requested |
 |---|---|---|
 | Bluetooth | Watch connect/disconnect events | `NSBluetoothAlwaysUsageDescription` in Info.plist; system prompt on first use |
-| Accessibility | Send keystrokes for UI-scripting fallback | Direct user to System Settings → Privacy & Security → Accessibility |
-| Automation | `osascript` against the target AI app | First AppleScript call triggers the prompt |
-| Microphone | Not needed by this app — the AI app owns the mic | n/a |
+| Automation (browser) | `NSAppleScript` against Safari/Chrome to open URL, run JS, close tab | First AppleScript call triggers the prompt |
+| Safari "Allow JavaScript from Apple Events" | Required for `do JavaScript` | Manual; surface a "not enabled" error and link to the Develop menu |
+| Accessibility | Fallback if `do JavaScript` is unavailable for a given trigger (rare) | Direct user to System Settings → Privacy & Security → Accessibility |
+| Microphone | Not this app's concern — the browser owns the mic | Browser prompts once when voice first activates |
 | Login item | Auto-start | `SMAppService.mainApp.register()` |
 
 ## Non-goals
 
-- Filtering / moderating what the child says to the AI. Out of scope; rely on the AI app's own safety.
+- Filtering / moderating what the child says to the AI. Out of scope; rely on the AI service's own safety.
 - Multi-user / multi-speaker routing.
 - Running without a Mac (e.g. on the speaker itself, or on a Raspberry Pi). Possible future direction but not v1.
 - iOS / iPad support.
+- Bundling or installing a browser. We use whatever the user has.
 
 ## Risks & open questions
 
-1. **AI app cooperation.** Neither ChatGPT nor Claude desktop currently advertises a stable "new voice session" URL scheme. The keystroke fallback works today but is fragile — a UI redesign in the AI app breaks it. Mitigation: profiles are data-driven and shipped as updates; the app surfaces a clear error ("Couldn't start a new session — the AI app's UI may have changed") rather than failing silently.
-2. **Audio routing.** macOS sometimes does not auto-switch the system output to a freshly connected Bluetooth speaker. May need to force-set the default output device via CoreAudio when the speaker connects. Verify on the actual hardware before assuming the OS handles it.
-3. **Voice activation in the AI app.** Some apps require a manual tap to start listening even after a new session is opened. If that's true for the chosen app, the keystroke profile must include the "start voice" shortcut, and if no such shortcut exists, the design breaks. Confirm per app before promising v1 support.
-4. **Speaker auto-reconnect reliability.** If the speaker fails to auto-connect on power-on, the child is stuck. This is a Bluetooth-stack problem, not something this app can fix — document the working speaker models.
-5. **Session boundaries.** Disconnect always ends the AI conversation. This loses context across sessions but avoids the next "connect" silently continuing an old chat, which would be more confusing for a child.
+1. **Web UI volatility.** The voice button's selector can change at any site deploy. Mitigation: profiles are data-driven and shippable as app updates; the app surfaces a clear error ("Couldn't start voice mode — the site UI may have changed") rather than failing silently. Consider a remote-fetched profile bundle later so a selector change does not require a binary update.
+2. **Login persistence.** If the session cookie expires, the page lands on a sign-in screen and the child is stuck. Mitigation: run `signedInProbe` after the page loads; if it returns false, show "Please sign in again on the Mac" in the menu bar instead of clicking blindly.
+3. **Audio routing.** macOS sometimes does not auto-switch the system output to a freshly connected Bluetooth speaker. May need to force-set the default output device via CoreAudio when the speaker connects. Verify on the actual hardware before assuming the OS handles it.
+4. **Browser microphone prompt.** The first time voice activates, Safari/Chrome prompts for microphone access on the site. This needs to happen once with an adult present; document it in the setup flow and check it as part of the "Test now" button.
+5. **Speaker auto-reconnect reliability.** If the speaker fails to auto-connect on power-on, the child is stuck. This is a Bluetooth-stack problem, not something this app can fix — document the working speaker models.
+6. **Session boundaries.** Disconnect always ends the AI conversation (tab close). This loses context across sessions but avoids the next "connect" silently continuing an old chat, which would be more confusing for a child.
+7. **Native voice mode arrives later.** If/when ChatGPT or Claude desktop apps ship voice mode, a native profile will be simpler and more robust than the web path. Keep `AIServiceProfile` open enough that a native variant (bundle ID + launch strategy) can be added without churn.
 
 ## Milestones
 
 - **M1 — Watcher prototype.** Detect a chosen paired Bluetooth device connecting / disconnecting; log to console. ~1 day.
-- **M2 — ChatGPT launch + new voice session.** Hardcoded ChatGPT profile. Resolve every "specifics to verify" item above before declaring done. ~1–2 days.
-- **M3 — Settings UI + persistence + login item.** Menu-bar app shell, device picker, app picker (ChatGPT only in v1, but plumbed through `AIAppProfile` so adding Claude is just data). ~2 days.
-- **M4 — Claude macOS profile + audio routing fix if needed.** ~1–2 days.
-- **M5 — Polish: status indicators, error surfacing, "Test now" button, README.** ~1 day.
+- **M2 — ChatGPT web launch + voice trigger in Safari.** Hardcoded ChatGPT profile. Resolve every "specifics to verify" item above before declaring done. ~1–2 days.
+- **M3 — Settings UI + persistence + login item.** Menu-bar app shell, device picker, service picker, browser picker (Safari only in v1, but plumbed through `AIServiceProfile` / `browserBundleID` so adding Chrome / Claude is just data). ~2 days.
+- **M4 — Claude web profile + Chrome support + audio routing fix if needed.** ~1–2 days.
+- **M5 — Polish: status indicators, error surfacing (selector-broken, login-expired, JS-from-Apple-Events-off), "Test now" button, README.** ~1 day.
