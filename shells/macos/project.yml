@@ -1,0 +1,48 @@
+name: SpeakerAIConnector
+options:
+  bundleIdPrefix: com.secfree
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "5.10"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: YES
+    DEAD_CODE_STRIPPING: YES
+
+targets:
+  SpeakerAIConnector:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+    info:
+      path: Sources/App/Info.plist
+      properties:
+        CFBundleName: Speaker AI Connector
+        CFBundleDisplayName: Speaker AI Connector
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSUIElement: true
+        LSMinimumSystemVersion: $(MACOSX_DEPLOYMENT_TARGET)
+        NSHumanReadableCopyright: ""
+        NSBluetoothAlwaysUsageDescription: "Speaker AI Connector watches for your chosen Bluetooth speaker connecting so it can start an AI voice session automatically."
+        NSMicrophoneUsageDescription: "Speaker AI Connector captures audio from the Bluetooth speaker's microphone and streams it to the AI service."
+    entitlements:
+      path: Sources/App/SpeakerAIConnector.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.device.bluetooth: true
+        com.apple.security.device.audio-input: true
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.secfree.SpeakerAIConnector
+        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        COMBINE_HIDPI_IMAGES: YES

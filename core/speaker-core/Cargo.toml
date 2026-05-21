@@ -1,0 +1,12 @@
+[package]
+name = "speaker-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "speaker_core"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]

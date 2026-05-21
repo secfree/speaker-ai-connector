@@ -1,0 +1,21 @@
+# XcodeGen output — regenerated from project.yml
+*.xcodeproj
+*.xcworkspace
+
+# Xcode user state / derived data
+xcuserdata/
+DerivedData/
+build/
+*.xcuserstate
+
+# Swift Package Manager
+.swiftpm/
+.build/
+Package.resolved
+
+# Rust
+core/target/
+**/target/
+
+# macOS
+.DS_Store

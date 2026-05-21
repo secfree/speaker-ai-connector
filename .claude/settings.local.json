@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xcodegen --version)",
+      "Bash(brew install *)",
+      "Bash(xcodegen generate *)",
+      "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug -destination 'platform=macOS' build)",
+      "Bash(cargo build *)",
+      "Bash(command -v xcodegen)"
+    ]
+  }
+}
