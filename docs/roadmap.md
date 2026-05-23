@@ -37,7 +37,7 @@ expanding the original.
   - [done] Handle mismatched input/output rates and channel counts (downmix-to-mono on capture, linear-interpolation resample + fan-out on playback). Trivial resampler — replace with the real one in M4.
   - [done] Log negotiated input/output rate+channel counts to stderr at loopback start, for routing diagnosis.
 - [done] Decide whether the force-default-output helper lands in M2 or M6 (design leaves this open) and document the choice. **Chosen: M2.**
-- [todo] If yes: implement the CoreAudio force-default-output helper behind a settings toggle.
+- [done] If yes: implement the CoreAudio force-default-output helper behind a settings toggle.
 - [done] Improve the loopback toggle in `SettingsView`: auto-stop after ~3 s (currently a manual on/off toggle) and show a distinct error when mic permission is denied vs. other failures.
 - [done] Confirm `NSMicrophoneUsageDescription` triggers the system prompt on first capture. Wired via `AVCaptureDevice.requestAccess(for: .audio)` in the Swift `Coordinator`; verified on hardware.
 

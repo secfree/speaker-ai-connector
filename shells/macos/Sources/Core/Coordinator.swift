@@ -40,6 +40,10 @@ final class Coordinator: ObservableObject {
             refreshIdleStatus()
         }
     }
+    /// When on, the core's CoreAudio helper overrides the system default
+    /// output to the target speaker before a session starts. In-memory
+    /// only for M2; persistence to TOML lands in M5.
+    @Published var forceDefaultOutput: Bool = false
 
     let watcher = BluetoothWatcher()
 
@@ -92,6 +96,15 @@ final class Coordinator: ObservableObject {
     }
 
     private func beginLoopbackStream() {
+        if forceDefaultOutput, let addr = targetAddress {
+            let rc = addr.withCString { speaker_core_audio_force_default_output($0) }
+            if rc != 0 {
+                // Don't abort loopback — the user may want to hear what
+                // routing does in the default state. Surface the failure
+                // so they know the toggle didn't apply this run.
+                log.warning("force-default-output failed (code \(rc, privacy: .public))")
+            }
+        }
         let rc = speaker_core_audio_loopback_start()
         guard rc == 0 else {
             status = .error("Audio loopback failed (code \(rc))")

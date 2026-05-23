@@ -20,6 +20,14 @@ struct SettingsView: View {
                 }
             }
 
+            Section("Routing") {
+                Toggle("Force default output to target speaker", isOn: $coordinator.forceDefaultOutput)
+                    .disabled(coordinator.targetAddress == nil)
+                Text("On some Macs the system keeps playing through the built-in speakers even after a Bluetooth speaker connects. Enable this to override the default output when a session starts.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Status") {
                 Text(coordinator.status.menuBarText)
                     .font(.system(.body, design: .monospaced))

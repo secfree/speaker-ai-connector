@@ -9,9 +9,11 @@
 //! shell can exercise the audio path end-to-end. The real coordinator
 //! wiring (auto-start on BT connect) lands in M4/M5.
 
-use std::ffi::c_char;
+use std::ffi::{c_char, CStr};
 
 use crate::audio;
+#[cfg(target_os = "macos")]
+use crate::routing;
 
 #[no_mangle]
 pub extern "C" fn speaker_core_version() -> *const c_char {
@@ -34,4 +36,33 @@ pub extern "C" fn speaker_core_audio_loopback_start() -> i32 {
 #[no_mangle]
 pub extern "C" fn speaker_core_audio_loopback_stop() {
     audio::stop_loopback();
+}
+
+/// Force the system default output to the Bluetooth speaker whose MAC
+/// address matches `address` (any common separator/case is accepted).
+///
+/// Returns 0 on success, a negative `RoutingError::code()` on failure,
+/// or -100 if the address pointer is null / non-UTF-8.
+///
+/// The shell calls this when the user has enabled the
+/// force-default-output toggle and a session is about to start; macOS
+/// otherwise sometimes keeps audio routed to the built-in speakers even
+/// after a BT speaker connects.
+#[cfg(target_os = "macos")]
+#[no_mangle]
+pub extern "C" fn speaker_core_audio_force_default_output(address: *const c_char) -> i32 {
+    if address.is_null() {
+        return -100;
+    }
+    let s = match unsafe { CStr::from_ptr(address) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -100,
+    };
+    match routing::force_default_output(s) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("speaker-core: force-default-output failed: {e:?}");
+            e.code()
+        }
+    }
 }
