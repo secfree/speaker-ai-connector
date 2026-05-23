@@ -4,7 +4,15 @@ import AppKit
 struct SettingsView: View {
     @EnvironmentObject var coordinator: Coordinator
     @State private var devices: [PairedDevice] = []
+    @State private var savedDeviceName: String? = nil
     @State private var apiKeyDraft: String = ""
+
+    /// Cadence for re-polling Bluetooth connection state while Settings
+    /// is open. `IOBluetooth`'s connect notifications fire on the watcher
+    /// but are filtered to the target device; a small timer is the
+    /// pragmatic way to keep the picker honest for *other* speakers
+    /// connecting/disconnecting in the background.
+    private let pickerRefresh = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
 
     var body: some View {
         Form {
@@ -42,12 +50,17 @@ struct SettingsView: View {
                     ForEach(devices) { device in
                         Text(device.name).tag(String?.some(device.address))
                     }
+                    if let saved = coordinator.targetAddress,
+                       !devices.contains(where: { $0.address == saved }) {
+                        Text("\(savedDeviceName ?? saved) (not connected)")
+                            .tag(String?.some(saved))
+                    }
                 }
                 .pickerStyle(.menu)
 
                 HStack {
-                    Button("Refresh paired devices") {
-                        devices = coordinator.pairedDevices()
+                    Button("Refresh") {
+                        refreshDevices()
                     }
                     Button("Test now") {
                         coordinator.runTestNow()
@@ -56,7 +69,7 @@ struct SettingsView: View {
                               || !coordinator.apiKeyStored
                               || coordinator.status.sessionInFlight)
                 }
-                Text("Test now simulates a Bluetooth connect end-to-end (record + Gemini Live), then a disconnect after about 3 seconds.")
+                Text("Only currently-connected speakers and headphones are listed. Connect your speaker over Bluetooth, then pick it here — the choice is remembered and used automatically next time it connects.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -136,7 +149,25 @@ struct SettingsView: View {
         }
         .padding(20)
         .frame(width: 460)
-        .onAppear { devices = coordinator.pairedDevices() }
+        .onAppear { refreshDevices() }
+        .onReceive(pickerRefresh) { _ in refreshDevices() }
+    }
+
+    private func refreshDevices() {
+        devices = coordinator.connectedSpeakers()
+        // Cache the saved device's friendly name from the paired list
+        // so the "(not connected)" row in the picker still shows it by
+        // name rather than as a raw MAC address.
+        if let saved = coordinator.targetAddress {
+            if let match = devices.first(where: { $0.address == saved }) {
+                savedDeviceName = match.name
+            } else if savedDeviceName == nil,
+                      let paired = coordinator.pairedDevices().first(where: { $0.address == saved }) {
+                savedDeviceName = paired.name
+            }
+        } else {
+            savedDeviceName = nil
+        }
     }
 
     private func revealSessionsFolder() {

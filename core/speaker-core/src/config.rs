@@ -103,8 +103,10 @@ pub enum VadSensitivity {
 
 impl Default for VadSensitivity {
     fn default() -> Self {
-        // Kid voices are quiet — lean permissive by default.
-        VadSensitivity::Quality
+        // Real-room testing surfaced a lot of background-noise false
+        // positives at the permissive end, so the default sits at the
+        // most restrictive level. Quieter voices can still dial it down.
+        VadSensitivity::VeryAggressive
     }
 }
 

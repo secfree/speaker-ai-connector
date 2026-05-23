@@ -59,6 +59,19 @@ final class BluetoothWatcher: NSObject {
         }
     }
 
+    /// Currently-connected audio peripherals (speakers/headphones/headsets).
+    /// The speaker picker filters to this so users don't have to scroll
+    /// past keyboards, mice, or paired-but-offline devices.
+    func connectedSpeakers() -> [PairedDevice] {
+        let devices = IOBluetoothDevice.pairedDevices() as? [IOBluetoothDevice] ?? []
+        return devices.compactMap { dev in
+            guard dev.isConnected() else { return nil }
+            guard dev.deviceClassMajor == UInt32(kBluetoothDeviceClassMajorAudio) else { return nil }
+            guard let addr = dev.addressString else { return nil }
+            return PairedDevice(address: normalize(addr), name: dev.name ?? addr)
+        }
+    }
+
     @objc private func handleConnect(_ notification: IOBluetoothUserNotification, device: IOBluetoothDevice) {
         guard let rawAddr = device.addressString else { return }
         let addr = normalize(rawAddr)

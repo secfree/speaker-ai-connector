@@ -503,6 +503,10 @@ final class Coordinator: ObservableObject {
         watcher.pairedDevices()
     }
 
+    func connectedSpeakers() -> [PairedDevice] {
+        watcher.connectedSpeakers()
+    }
+
     /// Forwards an OS-level BT event into the Rust coordinator. The
     /// returned status JSON is decoded and applied.
     private func handle(_ event: BTEvent) {
