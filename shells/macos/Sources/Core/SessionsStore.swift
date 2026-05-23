@@ -84,6 +84,23 @@ enum SessionsStore {
         }
     }
 
+    /// Delete the given session ids. Returns the ids that failed along
+    /// with the negative `SessionError` code so the caller can surface a
+    /// single inline message — partial failure is expected if one of the
+    /// ids is the live recording session (`-209`).
+    @discardableResult
+    static func delete(sessionIds: [String]) -> [(id: String, code: Int32)] {
+        var failures: [(id: String, code: Int32)] = []
+        for id in sessionIds {
+            let rc = id.withCString { speaker_core_sessions_delete($0) }
+            if rc != 0 {
+                log.error("delete session \(id, privacy: .public) failed: code \(rc)")
+                failures.append((id: id, code: rc))
+            }
+        }
+        return failures
+    }
+
     static func clipURL(sessionId: String, file: String) -> URL? {
         let rawOpt = sessionId.withCString { sid in
             file.withCString { f in

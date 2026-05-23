@@ -202,6 +202,29 @@ pub extern "C" fn speaker_core_sessions_clips(session_id: *const c_char) -> *mut
     }
 }
 
+/// Delete a session directory (manifest + clips) by id. Returns 0 on
+/// success, `-100` if `session_id` is null or non-UTF-8, otherwise a
+/// negative `SessionError::code()` (`-204` invalid id / path-traversal,
+/// `-205` not found, `-206` filesystem error, `-209` if the id matches
+/// the session currently being recorded).
+#[no_mangle]
+pub extern "C" fn speaker_core_sessions_delete(session_id: *const c_char) -> i32 {
+    if session_id.is_null() {
+        return -100;
+    }
+    let id = match unsafe { CStr::from_ptr(session_id) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -100,
+    };
+    match SessionRecorder::instance().delete_session(id) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("speaker-core: sessions delete failed: {e:?}");
+            e.code()
+        }
+    }
+}
+
 /// Absolute path to a clip's WAV file. Null on error / invalid input.
 /// Caller frees with `speaker_core_string_free`.
 #[no_mangle]

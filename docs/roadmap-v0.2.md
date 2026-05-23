@@ -12,14 +12,14 @@ expanding the original.
 
 ## N1 — Session management: delete sessions from the Sessions window
 
-- [todo] Add `delete_session(session_id)` to `sessions.rs` in the Rust core: removes the session directory (manifest + clip files) atomically-ish (best-effort, with path-traversal guard mirroring `clip_path`).
-- [todo] Expose `speaker_core_sessions_delete` over FFI (returns success/error JSON or status code).
-- [todo] `SessionsView`: support multi-select on the session list (Cmd-click / Shift-click).
-- [todo] Add a "Delete" button (and `⌫` keyboard shortcut) that removes the selected sessions after a confirmation alert ("Delete N sessions? This cannot be undone.").
-- [todo] Refuse to delete the session currently being recorded (active session id from the coordinator); show an inline error or disable the action.
-- [todo] Refresh the session list after delete; if a clip from a deleted session is currently playing in `AVAudioPlayer`, stop playback first.
-- [todo] Unit tests for `delete_session`: removes the directory, errors on unknown id, rejects traversal, leaves siblings intact.
-- [todo] Verify on hardware: record 3 sessions, delete the middle one from the UI, confirm the directory is gone and the other two still play back.
+- [done] Add `delete_session(session_id)` to `sessions.rs` in the Rust core: removes the session directory (manifest + clip files) atomically-ish (best-effort, with path-traversal guard mirroring `clip_path`).
+- [done] Expose `speaker_core_sessions_delete` over FFI (returns success/error JSON or status code).
+- [done] `SessionsView`: support multi-select on the session list (Cmd-click / Shift-click).
+- [done] Add a "Delete" button (and `⌫` keyboard shortcut) that removes the selected sessions after a confirmation alert ("Delete N sessions? This cannot be undone.").
+- [done] Refuse to delete the session currently being recorded (active session id from the coordinator); show an inline error or disable the action.
+- [done] Refresh the session list after delete; if a clip from a deleted session is currently playing in `AVAudioPlayer`, stop playback first.
+- [done] Unit tests for `delete_session`: removes the directory, errors on unknown id, rejects traversal, leaves siblings intact.
+- [done] Verify on hardware: record 3 sessions, delete the middle one from the UI, confirm the directory is gone and the other two still play back.
 
 ## N2 — Live dialogue window for manual "Start session"
 

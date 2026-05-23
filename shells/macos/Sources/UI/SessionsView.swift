@@ -9,66 +9,161 @@ import AppKit
 /// refresh and an auto-refresh on appear.
 struct SessionsView: View {
     @State private var sessions: [SessionInfo] = []
-    @State private var selectedSession: SessionInfo?
+    @State private var selectedIds: Set<String> = []
     @State private var clips: [ClipInfo] = []
-    @State private var nowPlayingClip: String?
+    @State private var nowPlayingClip: PlayingClip?
     @State private var playerHolder = PlayerHolder()
     @State private var lastError: String?
+    @State private var pendingDeleteIds: [String] = []
+    @State private var showDeleteConfirm: Bool = false
+
+    private var selectedSession: SessionInfo? {
+        guard selectedIds.count == 1, let id = selectedIds.first else { return nil }
+        return sessions.first(where: { $0.id == id })
+    }
 
     var body: some View {
         NavigationSplitView {
-            List(sessions, selection: $selectedSession) { session in
-                NavigationLink(value: session) {
-                    SessionRow(session: session)
-                }
-            }
-            .listStyle(.sidebar)
-            .navigationTitle("Sessions")
-            .toolbar {
-                ToolbarItem {
-                    Button {
-                        refresh()
-                    } label: {
-                        Label("Refresh", systemImage: "arrow.clockwise")
-                    }
-                }
-            }
+            sidebar
         } detail: {
-            if let selected = selectedSession {
-                ClipList(
-                    session: selected,
-                    clips: clips,
-                    nowPlayingClip: nowPlayingClip,
-                    onPlay: { clip in play(session: selected, clip: clip) },
-                    onStop: stop
-                )
-            } else if sessions.isEmpty {
-                EmptyStateView(error: lastError)
-            } else {
-                Text("Select a session")
-                    .foregroundStyle(.secondary)
-            }
+            detail
         }
         .frame(minWidth: 640, minHeight: 380)
         .onAppear { refresh() }
-        .onChange(of: selectedSession) { _, newValue in
-            if let s = newValue {
+        .onChange(of: selectedIds) { _, _ in
+            if let s = selectedSession {
                 clips = SessionsStore.clips(for: s.id)
             } else {
                 clips = []
             }
             stop()
         }
+        .alert(deleteAlertTitle, isPresented: $showDeleteConfirm) {
+            Button("Cancel", role: .cancel) {
+                pendingDeleteIds = []
+            }
+            Button("Delete", role: .destructive) {
+                performDelete(ids: pendingDeleteIds)
+                pendingDeleteIds = []
+            }
+        } message: {
+            Text("This cannot be undone.")
+        }
+    }
+
+    private var sidebar: some View {
+        List(sessions, selection: $selectedIds) { session in
+            SessionRow(session: session)
+                .tag(session.id)
+        }
+        .listStyle(.sidebar)
+        .navigationTitle("Sessions")
+        .toolbar {
+            ToolbarItem {
+                Button {
+                    requestDelete(ids: Array(selectedIds))
+                } label: {
+                    Label("Delete", systemImage: "trash")
+                }
+                .disabled(selectedIds.isEmpty)
+                .help(selectedIds.isEmpty ? "Select sessions to delete" : "Delete selected sessions")
+            }
+            ToolbarItem {
+                Button {
+                    refresh()
+                } label: {
+                    Label("Refresh", systemImage: "arrow.clockwise")
+                }
+            }
+        }
+        .onDeleteCommand {
+            // ⌫ — same path as the toolbar button.
+            if !selectedIds.isEmpty {
+                requestDelete(ids: Array(selectedIds))
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var detail: some View {
+        if let selected = selectedSession {
+            ClipList(
+                session: selected,
+                clips: clips,
+                nowPlayingClip: nowPlayingClip?.file,
+                onPlay: { clip in play(session: selected, clip: clip) },
+                onStop: stop
+            )
+        } else if selectedIds.count > 1 {
+            VStack(spacing: 6) {
+                Text("\(selectedIds.count) sessions selected")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+                Text("Press ⌫ or click Delete to remove them.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else if sessions.isEmpty {
+            EmptyStateView(error: lastError)
+        } else {
+            VStack(spacing: 6) {
+                Text("Select a session")
+                    .foregroundStyle(.secondary)
+                if let err = lastError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+        }
+    }
+
+    private var deleteAlertTitle: String {
+        let n = pendingDeleteIds.count
+        return n == 1 ? "Delete this session?" : "Delete \(n) sessions?"
     }
 
     private func refresh() {
         sessions = SessionsStore.list()
-        if let current = selectedSession, !sessions.contains(where: { $0.id == current.id }) {
-            selectedSession = nil
-        }
+        let existing = Set(sessions.map(\.id))
+        selectedIds.formIntersection(existing)
         if let s = selectedSession {
             clips = SessionsStore.clips(for: s.id)
+        } else {
+            clips = []
         }
+    }
+
+    private func requestDelete(ids: [String]) {
+        guard !ids.isEmpty else { return }
+        pendingDeleteIds = ids
+        showDeleteConfirm = true
+    }
+
+    private func performDelete(ids: [String]) {
+        // If we're playing a clip from a session about to disappear,
+        // stop AVAudioPlayer first — otherwise the player keeps a file
+        // handle on a path that no longer exists.
+        if let playing = nowPlayingClip, ids.contains(playing.sessionId) {
+            stop()
+        }
+        let failures = SessionsStore.delete(sessionIds: ids)
+        if failures.isEmpty {
+            lastError = nil
+        } else {
+            lastError = formatDeleteFailures(failures)
+        }
+        selectedIds.subtract(ids)
+        refresh()
+    }
+
+    private func formatDeleteFailures(_ failures: [(id: String, code: Int32)]) -> String {
+        let activeInUse = failures.contains(where: { $0.code == -209 })
+        if activeInUse {
+            return "Can't delete the session that's currently recording. Stop the session first."
+        }
+        let n = failures.count
+        return "Failed to delete \(n) session\(n == 1 ? "" : "s")."
     }
 
     private func play(session: SessionInfo, clip: ClipInfo) {
@@ -81,7 +176,7 @@ struct SessionsView: View {
             player.prepareToPlay()
             player.play()
             playerHolder.player = player
-            nowPlayingClip = clip.file
+            nowPlayingClip = PlayingClip(sessionId: session.id, file: clip.file)
         } catch {
             lastError = "Playback failed: \(error.localizedDescription)"
         }
@@ -92,6 +187,11 @@ struct SessionsView: View {
         playerHolder.player = nil
         nowPlayingClip = nil
     }
+}
+
+private struct PlayingClip: Equatable {
+    let sessionId: String
+    let file: String
 }
 
 /// AVAudioPlayer is class-typed and needs to outlive the closure that

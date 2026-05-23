@@ -46,6 +46,12 @@ char *speaker_core_sessions_clips(const char *session_id);
 // Absolute path to a clip's WAV file. NULL on error / not found.
 char *speaker_core_sessions_clip_path(const char *session_id, const char *clip_file);
 
+// Delete a session (manifest + clips). Returns 0 on success, negative
+// SessionError code on failure: -204 invalid id / path-traversal, -205
+// not found, -206 filesystem error, -209 active session in use (the id
+// matches the session currently being recorded — stop it first).
+int speaker_core_sessions_delete(const char *session_id);
+
 // Free a string returned by any of the speaker_core_sessions_*
 // functions. Safe to call with NULL.
 void speaker_core_string_free(char *ptr);

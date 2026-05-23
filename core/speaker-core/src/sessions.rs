@@ -44,6 +44,10 @@ pub enum SessionError {
     Io(String),
     Wav(String),
     Json(String),
+    /// Refusing to delete the session currently being recorded —
+    /// removing the directory out from under the writer would corrupt
+    /// the in-flight clip.
+    ActiveSessionInUse(String),
 }
 
 impl SessionError {
@@ -61,6 +65,7 @@ impl SessionError {
             SessionError::Io(_) => -206,
             SessionError::Wav(_) => -207,
             SessionError::Json(_) => -208,
+            SessionError::ActiveSessionInUse(_) => -209,
         }
     }
 }
@@ -345,6 +350,34 @@ impl SessionRecorder {
         Ok(manifest.clips)
     }
 
+    /// Remove a session directory (manifest + all clip files) from disk.
+    /// Best-effort atomic — `remove_dir_all` walks the tree, so a crash
+    /// mid-delete can leave a partial directory; the next `list_sessions`
+    /// will then skip it as an orphan (missing manifest).
+    ///
+    /// Refuses to delete the session currently being recorded — the
+    /// active WAV writer holds an open handle and the partial manifest
+    /// would be lost. The caller should stop the session first.
+    pub fn delete_session(&self, session_id: &str) -> Result<(), SessionError> {
+        if !is_safe_id(session_id) {
+            return Err(SessionError::InvalidId(session_id.into()));
+        }
+        {
+            let guard = self.state.lock().unwrap();
+            if let Some(active) = guard.as_ref() {
+                if active.id == session_id {
+                    return Err(SessionError::ActiveSessionInUse(session_id.into()));
+                }
+            }
+        }
+        let dir = self.root.join(session_id);
+        if !dir.is_dir() {
+            return Err(SessionError::NotFound(session_id.into()));
+        }
+        fs::remove_dir_all(&dir).map_err(|e| SessionError::Io(e.to_string()))?;
+        Ok(())
+    }
+
     pub fn clip_path(&self, session_id: &str, clip_file: &str) -> Result<PathBuf, SessionError> {
         if !is_safe_id(session_id) || !is_safe_clip_name(clip_file) {
             return Err(SessionError::InvalidId(format!("{session_id}/{clip_file}")));
@@ -563,6 +596,79 @@ mod tests {
         let sessions = rec.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].id, second);
+        cleanup(&root);
+    }
+
+    #[test]
+    fn delete_session_removes_directory_and_leaves_siblings() {
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+
+        let first = rec
+            .start_session(SessionTrigger::Manual, None, 16_000)
+            .unwrap();
+        rec.begin_clip(ClipDirection::In).unwrap();
+        rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
+        rec.end_clip(ClipDirection::In).unwrap();
+        rec.end_session().unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let second = rec
+            .start_session(SessionTrigger::Manual, None, 16_000)
+            .unwrap();
+        rec.end_session().unwrap();
+
+        let first_dir = root.join(&first);
+        let second_dir = root.join(&second);
+        assert!(first_dir.is_dir());
+        assert!(second_dir.is_dir());
+
+        rec.delete_session(&first).unwrap();
+        assert!(!first_dir.exists());
+        assert!(second_dir.is_dir(), "sibling session must be untouched");
+
+        let remaining = rec.list_sessions().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, second);
+
+        cleanup(&root);
+    }
+
+    #[test]
+    fn delete_session_unknown_id_errors() {
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let err = rec.delete_session("2024-01-01T00-00-00Z").unwrap_err();
+        assert!(matches!(err, SessionError::NotFound(_)));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn delete_session_rejects_traversal() {
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let err = rec.delete_session("../escape").unwrap_err();
+        assert!(matches!(err, SessionError::InvalidId(_)));
+        let err = rec.delete_session("").unwrap_err();
+        assert!(matches!(err, SessionError::InvalidId(_)));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn delete_session_refuses_active_session() {
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let id = rec
+            .start_session(SessionTrigger::Manual, None, 16_000)
+            .unwrap();
+        let err = rec.delete_session(&id).unwrap_err();
+        assert!(matches!(err, SessionError::ActiveSessionInUse(_)));
+        // Directory is still present after the refusal.
+        assert!(root.join(&id).is_dir());
+        rec.end_session().unwrap();
+        // And after the session ends, the delete goes through.
+        rec.delete_session(&id).unwrap();
+        assert!(!root.join(&id).exists());
         cleanup(&root);
     }
 
