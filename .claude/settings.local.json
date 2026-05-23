@@ -17,7 +17,8 @@
       "Bash(cargo test *)",
       "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build)",
       "Bash(make test *)",
-      "Bash(make build *)"
+      "Bash(make build *)",
+      "Bash(make app *)"
     ]
   }
 }

@@ -1,5 +1,8 @@
 import Foundation
 import Combine
+import os
+
+private let log = Logger(subsystem: "com.secfree.SpeakerAIConnector", category: "core")
 
 /// Mirrors `speaker_core::StatusEvent`.
 ///
@@ -43,7 +46,7 @@ final class Coordinator: ObservableObject {
 
     init() {
         if let cstr = speaker_core_version() {
-            print("[speaker] core version: \(String(cString: cstr))")
+            log.info("core version: \(String(cString: cstr), privacy: .public)")
         }
         refreshIdleStatus()
         start()
@@ -88,10 +91,10 @@ final class Coordinator: ObservableObject {
     private func handle(_ event: BTEvent) {
         switch event {
         case .connected(let address, let name):
-            print("[speaker] bt connected: \(name) [\(address)]")
+            log.info("bt connected: \(name, privacy: .public) [\(address, privacy: .public)]")
             status = .sessionActive(name: name)
         case .disconnected(let address, let name):
-            print("[speaker] bt disconnected: \(name) [\(address)]")
+            log.info("bt disconnected: \(name, privacy: .public) [\(address, privacy: .public)]")
             status = .waitingForDevice(name: name)
         }
     }

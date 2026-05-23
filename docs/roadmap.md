@@ -26,7 +26,7 @@ expanding the original.
 - [done] Log Bluetooth connect/disconnect events to the console from the shell, filtered by the address picked in Settings.
 - [done] Add a top-level `justfile` (or `Makefile`) wrapping `cargo build` + `xcodegen generate` so contributors don't have to remember the order.
 - [done] Unit tests for `Coordinator::handle` (target match, non-target ignored, no-target state, manual-start gated by speaker state, speaker-connect preempts manual session).
-- [todo] Verify M1 on real hardware: pair a speaker, see connect/disconnect events appear in the log when toggling its power.
+- [done] Verify M1 on real hardware: pair a speaker, see connect/disconnect events appear in the log when toggling its power.
 
 ## M2 — Audio capture + playback round-trip via `cpal`
 
@@ -36,7 +36,7 @@ expanding the original.
 - [done] Wire a loopback test: capture → ring buffer → playback. Verified on hardware (built-in mic → built-in speakers, and BT speaker HFP mic → BT speaker A2DP output).
   - [done] Handle mismatched input/output rates and channel counts (downmix-to-mono on capture, linear-interpolation resample + fan-out on playback). Trivial resampler — replace with the real one in M4.
   - [done] Log negotiated input/output rate+channel counts to stderr at loopback start, for routing diagnosis.
-- [todo] Decide whether the force-default-output helper lands in M2 or M6 (design leaves this open) and document the choice.
+- [done] Decide whether the force-default-output helper lands in M2 or M6 (design leaves this open) and document the choice. **Chosen: M2.**
 - [todo] If yes: implement the CoreAudio force-default-output helper behind a settings toggle.
 - [todo] Improve the loopback toggle in `SettingsView`: auto-stop after ~3 s (currently a manual on/off toggle) and show a distinct error when mic permission is denied vs. other failures.
 - [todo] Confirm `NSMicrophoneUsageDescription` triggers the system prompt on first capture.
