@@ -30,13 +30,15 @@ expanding the original.
 
 ## M2 — Audio capture + playback round-trip via `cpal`
 
-- [todo] Add `cpal` dependency to `speaker-core`.
-- [todo] Implement default-input capture at 16 kHz mono `i16` in `audio.rs`.
-- [todo] Implement default-output playback at 16 kHz mono `i16` in `audio.rs`.
-- [todo] Wire a loopback test: capture → ring buffer → playback. Verify locally with the speaker's mic going to the speaker's output.
+- [done] Add `cpal` dependency to `speaker-core`.
+- [done] Implement default-input capture in `audio.rs`. M2 uses device-native f32 at whatever rate/channels the OS hands us; the 16 kHz mono `i16` contract is deferred to M4 where it ships alongside the Gemini Live encoder.
+- [done] Implement default-output playback in `audio.rs`. Same scope deferral as capture — device-native f32, normalisation lives in M4.
+- [done] Wire a loopback test: capture → ring buffer → playback. Verified on hardware (built-in mic → built-in speakers, and BT speaker HFP mic → BT speaker A2DP output).
+  - [done] Handle mismatched input/output rates and channel counts (downmix-to-mono on capture, linear-interpolation resample + fan-out on playback). Trivial resampler — replace with the real one in M4.
+  - [done] Log negotiated input/output rate+channel counts to stderr at loopback start, for routing diagnosis.
 - [todo] Decide whether the force-default-output helper lands in M2 or M6 (design leaves this open) and document the choice.
 - [todo] If yes: implement the CoreAudio force-default-output helper behind a settings toggle.
-- [todo] Add a "Test audio" button in `SettingsView` that runs the loopback for ~3 s. Surfaces missing mic permission clearly.
+- [todo] Improve the loopback toggle in `SettingsView`: auto-stop after ~3 s (currently a manual on/off toggle) and show a distinct error when mic permission is denied vs. other failures.
 - [todo] Confirm `NSMicrophoneUsageDescription` triggers the system prompt on first capture.
 
 ## M3 — VAD relay using `libfvad`
