@@ -16,6 +16,7 @@ expanding the original.
 - [done] Stub out `coordinator.rs`, `audio.rs`, `vad.rs`, `gemini.rs`, `config.rs`, `ffi.rs`.
 - [done] Define `BTEvent` and `StatusEvent` enums in the coordinator.
 - [done] Implement minimal `Coordinator` (target address + connect/disconnect → status).
+- [todo] Add a `SessionCommand::{Start, Stop}` input to the coordinator for manual session triggering (rejected while a Bluetooth-driven session is active; speaker-connect during a manual session tears it down and re-launches).
 - [done] Create `shells/macos/project.yml` (XcodeGen) with Info.plist + entitlements.
 - [done] Scaffold SwiftUI `@main` app with `MenuBarExtra`.
 - [done] Implement `BluetoothWatcher.swift` (`IOBluetooth` connect/disconnect for paired devices).
@@ -24,7 +25,7 @@ expanding the original.
 - [todo] Wire the macOS shell's build to link `libspeaker_core.a` and call `speaker_core_version()` on launch.
 - [todo] Log Bluetooth connect/disconnect events to the console from the shell, filtered by the address picked in Settings.
 - [todo] Add a top-level `justfile` (or `Makefile`) wrapping `cargo build` + `xcodegen generate` so contributors don't have to remember the order.
-- [todo] Unit tests for `Coordinator::handle` (target match, non-target ignored, no-target state).
+- [todo] Unit tests for `Coordinator::handle` (target match, non-target ignored, no-target state, manual-start gated by speaker state, speaker-connect preempts manual session).
 - [todo] Verify M1 on real hardware: pair a speaker, see connect/disconnect events appear in the log when toggling its power.
 
 ## M2 — Audio capture + playback round-trip via `cpal`
@@ -54,18 +55,20 @@ expanding the original.
 - [todo] Pick child-appropriate Gemini safety defaults; record the choice in the design doc.
 - [todo] Store/retrieve API key via `keyring` (macOS Keychain). Add a masked input field in `SettingsView`.
 - [todo] Manual end-to-end test: speak into the laptop mic, hear Gemini's reply over the default output. (Speaker hardware comes in M6.)
+- [todo] Expose a temporary "Start manual session" entry point (CLI flag, debug menu, or test harness) that runs the full capture → VAD → Gemini → playback path against the default input/output, so the AI pipeline is testable without Bluetooth. The polished menu-bar Start/Stop session item lands in M5.
 - [todo] Surface each typed error as a distinct menu-bar message (per CLAUDE.md "Surface session failures explicitly").
 
 ## M5 — Real FFI surface + Coordinator wiring + persistence + login item
 
 - [todo] Decide FFI binding strategy: hand-written C ABI vs. `uniffi` vs. `swift-bridge`. Document the call.
-- [todo] Implement the chosen FFI: `BTEvent` in, `StatusEvent` out, config getters/setters. No raw PCM crosses the boundary.
+- [todo] Implement the chosen FFI: `BTEvent` in, `SessionCommand::{Start, Stop}` in, `StatusEvent` out, config getters/setters. No raw PCM crosses the boundary.
 - [todo] Replace the Swift placeholder `Coordinator` with calls into the Rust core.
 - [todo] Implement `config.rs`: TOML at `~/Library/Application Support/SpeakerAIConnector/config.toml` via `directories`.
 - [todo] Persist all non-secret settings (target device, model, VAD sensitivity, silence timeout, force-default-output toggle).
 - [todo] Wire `SMAppService.mainApp.register()` for "Start at login"; surface failure in `SettingsView`.
 - [todo] Implement the full session state machine: `Idle → Launching → SessionActive → TearingDown → Idle` driven by `BTEvent`s.
-- [todo] Render `StatusEvent`s in `MenuBarExtra` (text + icon variant per state).
+- [todo] Render `StatusEvent`s in `MenuBarExtra` (text + icon variant per state, including a manual-session indicator).
+- [todo] Add a **Start session / Stop session** item to `MenuBarExtra` that calls into the core's `SessionCommand` FFI. Disabled (or relabeled) while a Bluetooth-driven session is active.
 - [todo] Debounce Bluetooth events (default 5 s) inside the core, not the shell.
 - [todo] Add a "Test now" button in `SettingsView` that simulates a connect event end-to-end.
 
