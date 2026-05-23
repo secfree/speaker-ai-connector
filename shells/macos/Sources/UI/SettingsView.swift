@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct SettingsView: View {
     @EnvironmentObject var coordinator: Coordinator
@@ -57,7 +58,16 @@ struct SettingsView: View {
                 Button(coordinator.vadDiagnosticRunning ? "Stop VAD diagnostic" : "Start VAD diagnostic") {
                     coordinator.toggleVadDiagnostic()
                 }
-                Text("Routes your default input through the WebRTC VAD relay. Gate open/close transitions are logged to the system console (subsystem com.secfree.SpeakerAIConnector / category core, plus stderr).")
+                Text("Routes your default input through the WebRTC VAD relay. Each gate open/close pair is recorded as a clip under the sessions folder.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Sessions") {
+                Button("Reveal Sessions Folder") {
+                    revealSessionsFolder()
+                }
+                Text("Past sessions live as WAV clips under ~/Library/Application Support/SpeakerAIConnector/sessions. Open from the menu-bar Sessions… item to play back clips.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -65,6 +75,14 @@ struct SettingsView: View {
         .padding(20)
         .frame(width: 420)
         .onAppear { devices = coordinator.pairedDevices() }
+    }
+
+    private func revealSessionsFolder() {
+        guard let root = SessionsStore.rootPath() else { return }
+        // Create the directory if it doesn't exist so Finder has
+        // something to open on a fresh install.
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([root])
     }
 
     private var targetBinding: Binding<String?> {

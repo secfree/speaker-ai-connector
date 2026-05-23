@@ -9,11 +9,12 @@
 //! shell can exercise the audio path end-to-end. The real coordinator
 //! wiring (auto-start on BT connect) lands in M4/M5.
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{c_char, CStr, CString};
 
 use crate::audio;
 #[cfg(target_os = "macos")]
 use crate::routing;
+use crate::sessions::{SessionRecorder, SessionTrigger};
 use crate::vad::Sensitivity;
 
 #[no_mangle]
@@ -39,21 +40,32 @@ pub extern "C" fn speaker_core_audio_loopback_stop() {
     audio::stop_loopback();
 }
 
-/// Run the M3 VAD diagnostic: default input → 16 kHz mono i16 → VAD
-/// relay → stub sink that logs gate-open/close transitions. No audio
-/// leaves the machine. `sensitivity` is `0..=3` (Quality → VeryAggressive).
+/// Run the VAD diagnostic: default input → 16 kHz mono i16 → VAD relay
+/// → SessionRecorder. Each gate OPEN→CLOSED pair becomes one input
+/// clip under the sessions directory. No audio leaves the machine.
+/// `sensitivity` is `0..=3` (Quality → VeryAggressive).
 ///
-/// Returns 0 on success, `-101` if `sensitivity` is out of range, or a
-/// negative `AudioError::code()` on capture failure.
+/// Returns 0 on success, `-101` if `sensitivity` is out of range, a
+/// negative `AudioError::code()` on capture failure, or a negative
+/// `SessionError::code()` if the session can't be opened on disk.
 #[no_mangle]
 pub extern "C" fn speaker_core_vad_diagnostic_start(sensitivity: u8) -> i32 {
     let s = match Sensitivity::from_level(sensitivity) {
         Some(s) => s,
         None => return -101,
     };
+    let recorder = SessionRecorder::instance();
+    if let Err(e) = recorder.start_session(SessionTrigger::Manual, None, 16_000) {
+        eprintln!("speaker-core: vad diagnostic session start failed: {e:?}");
+        return e.code();
+    }
     match audio::start_vad_diagnostic(s) {
         Ok(()) => 0,
         Err(e) => {
+            // Best-effort rollback so a failed audio start doesn't leave
+            // a half-open session that would block the next attempt with
+            // AlreadyActive.
+            let _ = recorder.end_session();
             eprintln!("speaker-core: vad diagnostic start failed: {e:?}");
             e.code()
         }
@@ -64,6 +76,12 @@ pub extern "C" fn speaker_core_vad_diagnostic_start(sensitivity: u8) -> i32 {
 #[no_mangle]
 pub extern "C" fn speaker_core_vad_diagnostic_stop() {
     audio::stop_vad_diagnostic();
+    let recorder = SessionRecorder::instance();
+    if recorder.is_active() {
+        if let Err(e) = recorder.end_session() {
+            eprintln!("speaker-core: vad diagnostic session end failed: {e:?}");
+        }
+    }
 }
 
 /// Force the system default output to the Bluetooth speaker whose MAC
@@ -91,6 +109,118 @@ pub extern "C" fn speaker_core_audio_force_default_output(address: *const c_char
         Err(e) => {
             eprintln!("speaker-core: force-default-output failed: {e:?}");
             e.code()
+        }
+    }
+}
+
+// --- Session history --------------------------------------------------
+//
+// File paths and metadata leave the core as NUL-terminated UTF-8 strings
+// the shell must free with `speaker_core_string_free`. JSON is the
+// transport for list payloads — the surface is small enough that wiring
+// dedicated structs per query (or pulling in uniffi for M4 only) isn't
+// worth it. Raw PCM still does not cross the boundary — playback happens
+// in the shell via `AVAudioPlayer` against the returned file path.
+
+fn into_c_string(s: String) -> *mut c_char {
+    match CString::new(s) {
+        Ok(c) => c.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Free a string returned by any of the `speaker_core_sessions_*`
+/// functions or `speaker_core_sessions_root`. Safe to pass null.
+///
+/// # Safety
+/// `ptr` must have been returned by one of those functions and not yet
+/// freed.
+#[no_mangle]
+pub unsafe extern "C" fn speaker_core_string_free(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    drop(CString::from_raw(ptr));
+}
+
+/// Absolute path to the sessions directory (created lazily on first
+/// session start). Returned as a UTF-8 NUL-terminated string; caller
+/// frees with `speaker_core_string_free`.
+#[no_mangle]
+pub extern "C" fn speaker_core_sessions_root() -> *mut c_char {
+    let p = SessionRecorder::instance().root().to_string_lossy().into_owned();
+    into_c_string(p)
+}
+
+/// JSON array of session metadata (`SessionMeta`), newest first. Null
+/// on error. Caller frees with `speaker_core_string_free`.
+#[no_mangle]
+pub extern "C" fn speaker_core_sessions_list() -> *mut c_char {
+    match SessionRecorder::instance().list_sessions() {
+        Ok(metas) => match serde_json::to_string(&metas) {
+            Ok(s) => into_c_string(s),
+            Err(e) => {
+                eprintln!("speaker-core: sessions list serialize failed: {e:?}");
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            eprintln!("speaker-core: sessions list failed: {e:?}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// JSON array of `ClipMeta` for the given session id. Null on error or
+/// if the session doesn't exist. Caller frees with
+/// `speaker_core_string_free`.
+#[no_mangle]
+pub extern "C" fn speaker_core_sessions_clips(session_id: *const c_char) -> *mut c_char {
+    if session_id.is_null() {
+        return std::ptr::null_mut();
+    }
+    let id = match unsafe { CStr::from_ptr(session_id) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    match SessionRecorder::instance().list_clips(id) {
+        Ok(clips) => match serde_json::to_string(&clips) {
+            Ok(s) => into_c_string(s),
+            Err(e) => {
+                eprintln!("speaker-core: clips serialize failed: {e:?}");
+                std::ptr::null_mut()
+            }
+        },
+        Err(e) => {
+            eprintln!("speaker-core: clips lookup failed: {e:?}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Absolute path to a clip's WAV file. Null on error / invalid input.
+/// Caller frees with `speaker_core_string_free`.
+#[no_mangle]
+pub extern "C" fn speaker_core_sessions_clip_path(
+    session_id: *const c_char,
+    clip_file: *const c_char,
+) -> *mut c_char {
+    if session_id.is_null() || clip_file.is_null() {
+        return std::ptr::null_mut();
+    }
+    let id = match unsafe { CStr::from_ptr(session_id) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    let file = match unsafe { CStr::from_ptr(clip_file) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    match SessionRecorder::instance().clip_path(id, file) {
+        Ok(p) => into_c_string(p.to_string_lossy().into_owned()),
+        Err(e) => {
+            eprintln!("speaker-core: clip_path lookup failed: {e:?}");
+            std::ptr::null_mut()
         }
     }
 }

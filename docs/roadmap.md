@@ -51,16 +51,16 @@ expanding the original.
 
 ## M4 — Session recording + session history viewer
 
-- [todo] Define on-disk layout: `~/Library/Application Support/SpeakerAIConnector/sessions/<session-id>/` containing `manifest.json` + `<seq>-<in|out>.wav` clip files. `<session-id>` is the RFC 3339 UTC start timestamp; `<seq>` is a zero-padded ordinal within the session.
-- [todo] Add `hound` (WAV writer) and `serde_json` to `speaker-core`.
-- [todo] Implement `sessions.rs`: `SessionRecorder` with `start_session(trigger, target_addr) -> SessionHandle`, `begin_input_clip` / `write_input_frames` / `end_input_clip`, the same trio for output, and `end_session()` that finalizes the manifest.
-- [todo] Wire the recorder between the VAD gate and the (still-stubbed) upload sink: each gate OPEN → CLOSED becomes one input clip. The output side is stubbed for M4 and wired to real Gemini frames in M5.
-- [todo] Implement a query API on the core: `list_sessions() -> Vec<SessionMeta>` (newest first), `list_clips(session_id) -> Vec<ClipMeta>`, `clip_path(session_id, clip_id) -> PathBuf`.
-- [todo] Expose `list_sessions`, `list_clips`, and `clip_path` over FFI (file paths out, never PCM).
-- [todo] macOS shell: add a "Sessions…" item to the menu-bar that opens a new `SessionsView` window listing sessions newest-first (start time, duration, trigger, clip count).
-- [todo] In `SessionsView`, selecting a session shows clips in order with direction (in / out) icons, offset from session start, and duration. Clicking a clip plays it via `AVAudioPlayer`.
-- [todo] Add a "Reveal Sessions Folder" button in `SettingsView` that opens the sessions directory in Finder.
-- [todo] Verify end-to-end via the M3 VAD diagnostic: run `speaker_core_vad_diagnostic_start`, speak a few utterances, stop it, and confirm a session with the expected input clips appears in `SessionsView` and each plays back correctly.
+- [done] Define on-disk layout: `~/Library/Application Support/SpeakerAIConnector/sessions/<session-id>/` containing `manifest.json` + `<seq>-<in|out>.wav` clip files. `<session-id>` is the RFC 3339 UTC start timestamp with `:` → `-` for path portability; `<seq>` is a zero-padded ordinal within the session.
+- [done] Add `hound` (WAV writer), `serde`, `serde_json`, and `directories` to `speaker-core`.
+- [done] Implement `sessions.rs`: `SessionRecorder` with `start_session(trigger, target_addr, sample_rate)`, `begin_clip(direction)` / `write_frames(direction, samples)` / `end_clip(direction)` covering both in/out, and `end_session()` that finalises the manifest (best-effort flushes any open clip on shutdown).
+- [done] Wire the recorder between the VAD gate and the (still-stubbed) upload sink: each gate OPEN → CLOSED becomes one input clip. The output side is stubbed for M4 and wired to real Gemini frames in M5.
+- [done] Implement a query API on the core: `list_sessions() -> Vec<SessionMeta>` (newest first, orphans without manifests skipped), `list_clips(session_id) -> Vec<ClipMeta>`, `clip_path(session_id, clip_file) -> PathBuf` (path-traversal guarded).
+- [done] Expose `sessions_root`, `sessions_list`, `sessions_clips`, and `sessions_clip_path` over FFI as JSON / UTF-8 paths with a paired `speaker_core_string_free`. File paths out, never PCM.
+- [done] macOS shell: add a "Sessions…" item to the menu-bar that opens a new `SessionsView` window listing sessions newest-first (start time, duration, trigger, clip count).
+- [done] In `SessionsView`, selecting a session shows clips in order with direction (in / out) icons, offset from session start, and duration. Clicking a clip plays it via `AVAudioPlayer`.
+- [done] Add a "Reveal Sessions Folder" button in `SettingsView` that opens the sessions directory in Finder (creates the directory first so a fresh install still reveals something).
+- [done] Verify end-to-end on real hardware: ran `speaker_core_vad_diagnostic_start`, spoke a few utterances, stopped it, and the recorded clips appeared in `SessionsView` and played back correctly. (M4 only creates sessions through the VAD diagnostic — manual-session entry point lands in M5, Bluetooth-driven sessions in M6.)
 
 ## M5 — Gemini Live WebSocket client + API key in Keychain
 

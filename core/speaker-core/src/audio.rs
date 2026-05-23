@@ -15,6 +15,7 @@ use std::sync::{Mutex, OnceLock};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, Stream, StreamConfig};
 
+use crate::sessions::{ClipDirection, SessionRecorder};
 use crate::vad::{Sensitivity, VadRelay};
 
 #[derive(Debug)]
@@ -204,12 +205,14 @@ pub fn stop_loopback() {
 
 // --- VAD diagnostic --------------------------------------------------
 //
-// M3 wiring: default input → mono → 16 kHz i16 → VadRelay → stub sink.
-// "Stub sink" here is `eprintln!` of gate-open/close transitions and
-// rolling frame counts — the real Gemini Live upload sink lands in M4.
-// The 16 kHz mono `i16` contract is the same one the upload encoder
-// will need, so this diagnostic is the natural place to debug it now
-// without an API key in the loop.
+// Wiring: default input → mono → 16 kHz i16 → VadRelay → SessionRecorder.
+// Each gate OPEN→CLOSED pair becomes one input clip on disk; the
+// caller is expected to bracket the run with `SessionRecorder::start_session`
+// / `end_session` (the FFI surface does this). Gate transitions and
+// rolling counts are still logged to stderr for live diagnosis.
+//
+// The real Gemini Live upload sink lands in M5 and will attach
+// alongside the recorder — same callback, same 16 kHz mono i16 contract.
 
 /// 20 ms frames at 16 kHz — the WebRTC VAD's middle ground (10/30 ms
 /// are also legal). 20 ms keeps latency low without making the gate
@@ -328,20 +331,36 @@ pub fn start_vad_diagnostic(sensitivity: Sensitivity) -> Result<(), AudioError> 
                     return;
                 }
 
-                // Step 3: hand to the VAD relay; log transitions to the stub sink.
+                // Step 3: hand to the VAD relay, then route forwarded
+                // frames into the session recorder. Each OPEN→CLOSED
+                // pair becomes one input clip on disk.
                 let out = relay.process(&batch);
                 session_frames += (batch.len() / relay.frame_samples()) as u64;
                 forwarded_frames += out.frames.len() as u64;
+                let recorder = SessionRecorder::instance();
                 if out.opened {
                     eprintln!(
-                        "speaker-core: vad gate OPEN (seen {} frames so far)",
-                        session_frames
+                        "speaker-core: vad gate OPEN (seen {session_frames} frames so far)"
                     );
+                    if let Err(e) = recorder.begin_clip(ClipDirection::In) {
+                        // Log and keep running — losing one clip is
+                        // better than tearing down the diagnostic mid-
+                        // session over a transient FS error.
+                        eprintln!("speaker-core: session begin_clip failed: {e:?}");
+                    }
+                }
+                for frame in &out.frames {
+                    if let Err(e) = recorder.write_frames(ClipDirection::In, frame) {
+                        eprintln!("speaker-core: session write_frames failed: {e:?}");
+                        break;
+                    }
                 }
                 if out.closed {
+                    if let Err(e) = recorder.end_clip(ClipDirection::In) {
+                        eprintln!("speaker-core: session end_clip failed: {e:?}");
+                    }
                     eprintln!(
-                        "speaker-core: vad gate CLOSED (forwarded {} of {} frames)",
-                        forwarded_frames, session_frames
+                        "speaker-core: vad gate CLOSED (forwarded {forwarded_frames} of {session_frames} frames)"
                     );
                 }
             },

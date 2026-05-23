@@ -17,6 +17,12 @@ struct SpeakerAIConnectorApp: App {
             SettingsView()
                 .environmentObject(coordinator)
         }
+
+        Window("Sessions", id: "sessions") {
+            SessionsView()
+                .environmentObject(coordinator)
+        }
+        .windowResizability(.contentMinSize)
     }
 
     private func menuIcon(for status: StatusEvent) -> String {
@@ -33,10 +39,15 @@ struct SpeakerAIConnectorApp: App {
 struct MenuContent: View {
     @EnvironmentObject var coordinator: Coordinator
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Text(coordinator.status.menuBarText)
         Divider()
+        Button("Sessions…") {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "sessions")
+        }
         Button("Settings…") {
             NSApp.activate(ignoringOtherApps: true)
             openSettings()

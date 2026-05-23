@@ -28,4 +28,24 @@ int speaker_core_vad_diagnostic_start(unsigned char sensitivity);
 // Safe to call when no diagnostic is running.
 void speaker_core_vad_diagnostic_stop(void);
 
+// Session history (M4) — file paths and JSON metadata only; raw PCM
+// never crosses the FFI line. All returned strings are UTF-8 NUL-
+// terminated and must be freed with speaker_core_string_free.
+
+// Absolute path to the sessions directory. NULL on error.
+char *speaker_core_sessions_root(void);
+
+// JSON array of SessionMeta, newest first. NULL on error.
+char *speaker_core_sessions_list(void);
+
+// JSON array of ClipMeta for one session. NULL on error / not found.
+char *speaker_core_sessions_clips(const char *session_id);
+
+// Absolute path to a clip's WAV file. NULL on error / not found.
+char *speaker_core_sessions_clip_path(const char *session_id, const char *clip_file);
+
+// Free a string returned by any of the speaker_core_sessions_*
+// functions. Safe to call with NULL.
+void speaker_core_string_free(char *ptr);
+
 #endif

@@ -16,6 +16,7 @@ pub mod config;
 pub mod gemini;
 #[cfg(target_os = "macos")]
 pub mod routing;
+pub mod sessions;
 pub mod vad;
 
 pub use coordinator::{BTEvent, Coordinator, SessionCommand, StatusEvent};
