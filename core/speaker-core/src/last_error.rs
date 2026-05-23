@@ -33,6 +33,17 @@ pub fn set(err: &GeminiError) {
     });
 }
 
+/// Record a non-Gemini failure (e.g. audio path collapse on launch) so
+/// the shell still sees something on the error surface rather than a
+/// silent transition back to Idle.
+pub fn set_other(message: &str) {
+    *slot().lock().unwrap() = Some(LastError {
+        tag: "other",
+        code: -304,
+        message: message.to_string(),
+    });
+}
+
 pub fn take() -> Option<LastError> {
     slot().lock().unwrap().take()
 }

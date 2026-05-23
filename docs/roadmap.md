@@ -76,18 +76,18 @@ expanding the original.
 
 ## M6 — Real FFI surface + Coordinator wiring + persistence + login item
 
-- [todo] Decide FFI binding strategy: hand-written C ABI vs. `uniffi` vs. `swift-bridge`. Document the call.
-- [todo] Implement the chosen FFI: `BTEvent` in, `SessionCommand::{Start, Stop}` in, `StatusEvent` out, config getters/setters. No raw PCM crosses the boundary.
-- [todo] Replace the Swift placeholder `Coordinator` with calls into the Rust core.
-- [todo] Implement `config.rs`: TOML at `~/Library/Application Support/SpeakerAIConnector/config.toml` via `directories`.
-- [todo] Persist all non-secret settings (target device, model, VAD sensitivity, silence timeout, force-default-output toggle).
-- [todo] Wire `SMAppService.mainApp.register()` for "Start at login"; surface failure in `SettingsView`.
-- [todo] Implement the full session state machine: `Idle → Launching → SessionActive → TearingDown → Idle` driven by `BTEvent`s.
-- [todo] Wire `SessionRecorder` lifecycle into the state machine: `Launching → start_session(trigger, target_addr)`, `TearingDown → end_session()`. Replaces the M3-diagnostic-driven recording path from M4.
-- [todo] Render `StatusEvent`s in `MenuBarExtra` (text + icon variant per state, including a manual-session indicator).
-- [todo] Add a **Start session / Stop session** item to `MenuBarExtra` that calls into the core's `SessionCommand` FFI. Disabled (or relabeled) while a Bluetooth-driven session is active.
-- [todo] Debounce Bluetooth events (default 5 s) inside the core, not the shell.
-- [todo] Add a "Test now" button in `SettingsView` that simulates a connect event end-to-end.
+- [done] Decide FFI binding strategy: hand-written C ABI vs. `uniffi` vs. `swift-bridge`. Document the call. **Chosen: hand-written C ABI** — surface is small (~25 functions); codegen would add build cost for little benefit. Recorded in [v0.1-design.md §FFI surface](v0.1-design.md#risks--open-questions).
+- [done] Implement the chosen FFI: `BTEvent` in, `SessionCommand::{Start, Stop}` in, `StatusEvent` out (JSON), config getters/setters. No raw PCM crosses the boundary. New surface lives in `speaker_core_coord_*` and `speaker_core_settings_*`.
+- [done] Replace the Swift placeholder `Coordinator` with calls into the Rust core. Swift Coordinator now forwards BT events, polls revision/status, and reads/writes Settings through FFI.
+- [done] Implement `config.rs`: TOML at `~/Library/Application Support/SpeakerAIConnector/config.toml` via `directories`.
+- [done] Persist all non-secret settings (target device, model, VAD sensitivity, silence timeout, force-default-output toggle).
+- [done] Wire `SMAppService.mainApp.register()` for "Start at login"; surface failure in `SettingsView`. Helper in `shells/macos/Sources/Core/LoginItem.swift`.
+- [done] Implement the full session state machine: `Idle → Launching → SessionActive → TearingDown → Idle` driven by `BTEvent`s. Async transitions land on a background thread; revision counter lets the shell skip JSON decode when nothing changed.
+- [done] Wire `SessionRecorder` lifecycle into the state machine: `Launching → start_session(trigger, target_addr)`, `TearingDown → end_session()`. Replaces the M3-diagnostic-driven recording path from M4. `audio::start_session(_, _, _, trigger, target_addr)` is the shared entry point.
+- [done] Render `StatusEvent`s in `MenuBarExtra` (text + icon variant per state, including a manual-session indicator). Icon set: BT active → `dot.radiowaves`, BT launching → `arrow.triangle.2.circlepath`, manual active → `mic.fill`, manual launching → `mic.badge.plus`, tearing down → `arrow.down.circle`.
+- [done] Add a **Start session / Stop session** item to `MenuBarExtra` that calls into the core's `SessionCommand` FFI. Disabled while a Bluetooth-driven session is active; relabeled to *"Start session (speaker connected)"* so the disabled state reads clearly.
+- [done] Debounce Bluetooth events (default 5 s) inside the core, not the shell. Watcher no longer keeps per-address timestamps — `Coordinator::handle_bt` rejects repeats inside `BT_CONNECT_DEBOUNCE`.
+- [done] Add a "Test now" button in `SettingsView` that simulates a connect event end-to-end. Disabled until a target + API key are configured; the simulated session auto-stops after ~3 s via `simulate_disconnect`.
 
 ## M7 — On-hardware polish
 

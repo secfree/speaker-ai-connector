@@ -12,7 +12,8 @@
 use std::ffi::{c_char, CStr, CString};
 
 use crate::audio;
-use crate::config;
+use crate::config::{self, Settings, VadSensitivity};
+use crate::coordinator::{BTEvent, Coordinator, SessionCommand};
 use crate::gemini::DEFAULT_MODEL;
 use crate::last_error;
 #[cfg(target_os = "macos")]
@@ -392,4 +393,207 @@ pub extern "C" fn speaker_core_last_session_error_tag() -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn speaker_core_last_session_error_clear() {
     last_error::clear();
+}
+
+// --- Coordinator (M6) -----------------------------------------------
+//
+// BTEvent in / SessionCommand in, StatusEvent JSON out. The shell pushes
+// raw BT events from `IOBluetoothDevice` notifications; the core handles
+// matching against the configured target, debouncing, and driving the
+// audio + Gemini pipeline. Each mutating call returns the resulting
+// status synchronously; the shell can also poll `_status` on a timer for
+// async transitions (Launching → Active / Error).
+
+fn status_json_or_null(s: crate::coordinator::StatusEvent) -> *mut c_char {
+    match serde_json::to_string(&s) {
+        Ok(json) => into_c_string(json),
+        Err(e) => {
+            eprintln!("speaker-core: status serialize failed: {e:?}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+fn cstr_to_str_opt(p: *const c_char) -> Option<String> {
+    if p.is_null() {
+        return None;
+    }
+    unsafe { CStr::from_ptr(p) }
+        .to_str()
+        .ok()
+        .map(|s| s.to_string())
+}
+
+/// Push a Bluetooth connect event from the shell's IOBluetooth watcher.
+/// Both `address` and `name` are required (non-null UTF-8). Returns the
+/// resulting `StatusEvent` as JSON; caller frees with `speaker_core_string_free`.
+#[no_mangle]
+pub extern "C" fn speaker_core_coord_push_bt_connect(
+    address: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let addr = match cstr_to_str_opt(address) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let nm = cstr_to_str_opt(name).unwrap_or_else(|| addr.clone());
+    let status = Coordinator::instance().handle_bt(BTEvent::Connected { address: addr, name: nm });
+    status_json_or_null(status)
+}
+
+#[no_mangle]
+pub extern "C" fn speaker_core_coord_push_bt_disconnect(
+    address: *const c_char,
+    name: *const c_char,
+) -> *mut c_char {
+    let addr = match cstr_to_str_opt(address) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    let nm = cstr_to_str_opt(name).unwrap_or_else(|| addr.clone());
+    let status = Coordinator::instance().handle_bt(BTEvent::Disconnected { address: addr, name: nm });
+    status_json_or_null(status)
+}
+
+/// Push a session command. `command` is `0` for Start, `1` for Stop;
+/// anything else is treated as Stop (defensive, since the shell side
+/// uses an enum). Returns the resulting `StatusEvent` JSON.
+#[no_mangle]
+pub extern "C" fn speaker_core_coord_push_command(command: i32) -> *mut c_char {
+    let cmd = match command {
+        0 => SessionCommand::Start,
+        _ => SessionCommand::Stop,
+    };
+    let status = Coordinator::instance().handle_command(cmd);
+    status_json_or_null(status)
+}
+
+/// Current status snapshot — the shell polls this on a timer to pick up
+/// async state transitions (Launching → Active / Error / TearingDown).
+#[no_mangle]
+pub extern "C" fn speaker_core_coord_status() -> *mut c_char {
+    status_json_or_null(Coordinator::instance().status())
+}
+
+/// Revision counter for the coordinator state. Bumps on every state
+/// transition; cheap to poll because no JSON is built. The shell uses
+/// this to avoid decoding when nothing has changed since the last tick.
+#[no_mangle]
+pub extern "C" fn speaker_core_coord_revision() -> u64 {
+    Coordinator::instance().revision()
+}
+
+/// Simulate a connect event for the configured target. Wired to the
+/// "Test now" button in Settings. Returns the resulting status JSON.
+#[no_mangle]
+pub extern "C" fn speaker_core_coord_simulate_connect() -> *mut c_char {
+    status_json_or_null(Coordinator::instance().simulate_connect())
+}
+
+/// Symmetric counterpart of `_simulate_connect` — the shell uses this
+/// after a delay to verify the teardown path too.
+#[no_mangle]
+pub extern "C" fn speaker_core_coord_simulate_disconnect() -> *mut c_char {
+    status_json_or_null(Coordinator::instance().simulate_disconnect())
+}
+
+// --- Settings (M6) --------------------------------------------------
+//
+// TOML-backed non-secret settings. Reads return the full struct as JSON
+// (one round-trip per Settings window open); writes persist synchronously
+// and refresh the coordinator's cached snapshot.
+
+/// Returns the full `Settings` struct as JSON. Caller frees with
+/// `speaker_core_string_free`. Null only on serialization failure.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_get() -> *mut c_char {
+    let s = Settings::current();
+    match serde_json::to_string(&s) {
+        Ok(json) => into_c_string(json),
+        Err(e) => {
+            eprintln!("speaker-core: settings serialize failed: {e:?}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Set the target BT speaker address. Pass null to clear the selection.
+/// Persists to TOML. Returns 0 on success or a negative `ConfigError::code()`.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_target(address: *const c_char) -> i32 {
+    let addr = if address.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(address) }.to_str() {
+            Ok(s) if !s.is_empty() => Some(s.to_string()),
+            Ok(_) => None,
+            Err(_) => return -100,
+        }
+    };
+    match Settings::update(|s| s.target_address = addr) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => {
+            eprintln!("speaker-core: settings set_target failed: {e:?}");
+            e.code()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_model(model: *const c_char) -> i32 {
+    if model.is_null() {
+        return -100;
+    }
+    let m = match unsafe { CStr::from_ptr(model) }.to_str() {
+        Ok(s) if !s.is_empty() => s.to_string(),
+        _ => return -100,
+    };
+    match Settings::update(|s| s.model = m) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// `level` is 0..=3 (Quality → VeryAggressive).
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_vad_sensitivity(level: u8) -> i32 {
+    let v = match VadSensitivity::from_level(level) {
+        Some(v) => v,
+        None => return -101,
+    };
+    match Settings::update(|s| s.vad_sensitivity = v) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_silence_timeout_ms(ms: u32) -> i32 {
+    match Settings::update(|s| s.silence_timeout_ms = ms) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_force_default_output(enabled: i32) -> i32 {
+    match Settings::update(|s| s.force_default_output = enabled != 0) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
 }

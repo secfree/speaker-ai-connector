@@ -45,8 +45,32 @@ struct SettingsView: View {
                 }
                 .pickerStyle(.menu)
 
-                Button("Refresh paired devices") {
-                    devices = coordinator.pairedDevices()
+                HStack {
+                    Button("Refresh paired devices") {
+                        devices = coordinator.pairedDevices()
+                    }
+                    Button("Test now") {
+                        coordinator.runTestNow()
+                    }
+                    .disabled(coordinator.targetAddress == nil
+                              || !coordinator.apiKeyStored
+                              || coordinator.status.sessionInFlight)
+                }
+                Text("Test now simulates a Bluetooth connect end-to-end (record + Gemini Live), then a disconnect after about 3 seconds.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Startup") {
+                Toggle("Start at login", isOn: loginItemBinding)
+                if let err = coordinator.loginItemError {
+                    Text(err)
+                        .font(.caption)
+                        .foregroundStyle(Color.red)
+                } else {
+                    Text("Registers the app via SMAppService so it relaunches in the background when you log in.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
 
@@ -70,8 +94,17 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .disabled(coordinator.vadDiagnosticRunning)
+                .disabled(coordinator.vadDiagnosticRunning || coordinator.status.sessionInFlight)
                 Text("Higher sensitivity rejects more non-speech but also drops quieter voices. Lower is better for a child's voice in a quiet room.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Model") {
+                TextField("Gemini Live model id", text: $coordinator.model)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(coordinator.status.sessionInFlight)
+                Text("Live API model id, e.g. models/gemini-3.1-flash-live-preview. Persisted to config.toml.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -102,7 +135,7 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 420)
+        .frame(width: 460)
         .onAppear { devices = coordinator.pairedDevices() }
     }
 
@@ -118,6 +151,13 @@ struct SettingsView: View {
         Binding(
             get: { coordinator.targetAddress },
             set: { coordinator.targetAddress = $0 }
+        )
+    }
+
+    private var loginItemBinding: Binding<Bool> {
+        Binding(
+            get: { coordinator.loginItemEnabled },
+            set: { coordinator.setLoginItemEnabled($0) }
         )
     }
 }

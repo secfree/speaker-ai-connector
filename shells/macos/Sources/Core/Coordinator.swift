@@ -5,18 +5,18 @@ import os
 
 private let log = Logger(subsystem: "com.secfree.SpeakerAIConnector", category: "core")
 
-/// Mirrors `speaker_core::StatusEvent`.
-///
-/// M1 placeholder: this Swift type and the wrapper class below host
-/// the coordinator logic until the Rust core's FFI surface lands in
-/// M5. The shape is intentionally the same so the move is mechanical.
+/// Mirrors `speaker_core::coordinator::StatusEvent` (decoded from the
+/// JSON the FFI returns). The shell pattern-matches on this for menu-bar
+/// text and icon variants.
 enum StatusEvent: Equatable {
     case idle
     case noDeviceSelected
     case waitingForDevice(name: String)
     case sessionLaunching(name: String)
     case sessionActive(name: String)
+    case manualSessionLaunching
     case manualSessionActive
+    case tearingDown(name: String)
     case error(String)
 
     var menuBarText: String {
@@ -24,18 +24,49 @@ enum StatusEvent: Equatable {
         case .idle: return "Idle"
         case .noDeviceSelected: return "Pick a speaker"
         case .waitingForDevice(let name): return "Waiting for \(name)"
-        case .sessionLaunching(let name): return "Launching session: \(name)"
+        case .sessionLaunching(let name): return "Launching: \(name)"
         case .sessionActive(let name): return "Connected: \(name)"
+        case .manualSessionLaunching: return "Launching manual session…"
         case .manualSessionActive: return "Manual session active"
+        case .tearingDown(let name): return "Tearing down \(name)…"
         case .error(let msg): return "Error: \(msg)"
+        }
+    }
+
+    /// True when an audio + Gemini session is currently in-flight (any
+    /// kind, any phase). Used to disable the "Start session" item.
+    var sessionInFlight: Bool {
+        switch self {
+        case .sessionLaunching, .sessionActive, .manualSessionLaunching,
+             .manualSessionActive, .tearingDown:
+            return true
+        case .idle, .noDeviceSelected, .waitingForDevice, .error:
+            return false
+        }
+    }
+
+    /// True only when a Bluetooth-driven session owns the audio path.
+    /// The menu's Start/Stop item is disabled in this case (per design:
+    /// manual is rejected while BT owns the speaker).
+    var bluetoothSessionInFlight: Bool {
+        switch self {
+        case .sessionLaunching, .sessionActive: return true
+        default: return false
+        }
+    }
+
+    var manualSessionInFlight: Bool {
+        switch self {
+        case .manualSessionLaunching, .manualSessionActive: return true
+        default: return false
         }
     }
 }
 
-/// Mirrors `speaker_core::vad::Sensitivity`. Four levels, lowest is
-/// most permissive (Quality) — kid voices are quiet enough that the
-/// default sits at the lenient end.
-enum VadSensitivity: UInt8, CaseIterable, Identifiable {
+/// Mirrors `speaker_core::vad::Sensitivity` / `config::VadSensitivity`.
+/// The TOML stores the named variant (`"Quality"`, `"LowBitrate"`, etc.)
+/// for readability; the FFI setter takes the `0..=3` level.
+enum VadSensitivity: UInt8, CaseIterable, Identifiable, Codable {
     case quality = 0
     case lowBitrate = 1
     case aggressive = 2
@@ -51,6 +82,41 @@ enum VadSensitivity: UInt8, CaseIterable, Identifiable {
         case .veryAggressive: return "Very aggressive (most restrictive)"
         }
     }
+
+    init?(tomlVariant: String) {
+        switch tomlVariant {
+        case "Quality": self = .quality
+        case "LowBitrate": self = .lowBitrate
+        case "Aggressive": self = .aggressive
+        case "VeryAggressive": self = .veryAggressive
+        default: return nil
+        }
+    }
+}
+
+/// Decoded shape of the JSON returned by `speaker_core_settings_get`.
+private struct SettingsPayload: Decodable {
+    let targetAddress: String?
+    let model: String
+    let vadSensitivity: String
+    let silenceTimeoutMs: UInt32
+    let forceDefaultOutput: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case targetAddress = "target_address"
+        case model
+        case vadSensitivity = "vad_sensitivity"
+        case silenceTimeoutMs = "silence_timeout_ms"
+        case forceDefaultOutput = "force_default_output"
+    }
+}
+
+/// Decoded shape of the JSON returned by `speaker_core_coord_status` and
+/// the mutating coordinator calls.
+private struct StatusPayload: Decodable {
+    let variant: String
+    let name: String?
+    let message: String?
 }
 
 @MainActor
@@ -58,47 +124,121 @@ final class Coordinator: ObservableObject {
     @Published private(set) var status: StatusEvent = .idle
     @Published private(set) var loopbackRunning: Bool = false
     @Published private(set) var vadDiagnosticRunning: Bool = false
-    @Published private(set) var manualSessionRunning: Bool = false
     @Published private(set) var apiKeyStored: Bool = false
+    @Published private(set) var loginItemEnabled: Bool = false
+    @Published private(set) var loginItemError: String? = nil
+
+    /// Mirrors of the persisted settings. Writing flushes through the
+    /// FFI so the Rust side is the source of truth — these `@Published`
+    /// properties exist purely so SwiftUI bindings work naturally.
     @Published var targetAddress: String? {
-        didSet {
-            watcher.targetAddress = targetAddress
-            refreshIdleStatus()
-        }
+        didSet { if oldValue != targetAddress { persistTarget() } }
     }
-    /// When on, the core's CoreAudio helper overrides the system default
-    /// output to the target speaker before a session starts. In-memory
-    /// only for M2; persistence to TOML lands in M6.
-    @Published var forceDefaultOutput: Bool = false
-    /// In-memory only for M3; persistence to TOML lands in M6. Changes
-    /// during a running diagnostic only take effect on the next start —
-    /// libfvad's mode applies at relay construction time.
-    @Published var vadSensitivity: VadSensitivity = .quality
+    @Published var forceDefaultOutput: Bool {
+        didSet { if oldValue != forceDefaultOutput { persistForceDefaultOutput() } }
+    }
+    @Published var vadSensitivity: VadSensitivity {
+        didSet { if oldValue != vadSensitivity { persistVadSensitivity() } }
+    }
+    /// Model id (e.g. `models/gemini-3.1-flash-live-preview`). Editable
+    /// in Settings for debugging; persisted to TOML.
+    @Published var model: String {
+        didSet { if oldValue != model { persistModel() } }
+    }
 
     let watcher = BluetoothWatcher()
 
-    /// How long the diagnostics loopback runs before auto-stopping.
-    /// Short enough that an accidental click can't pin the audio devices
-    /// open, long enough to actually hear a few words.
     static let loopbackAutoStopSeconds: UInt64 = 3
+    /// Status polling interval — picks up async transitions (Launching
+    /// → Active / Error) without spinning. 500 ms feels responsive
+    /// enough for menu-bar UX without burning cycles.
+    private static let statusPollInterval: TimeInterval = 0.5
 
     private var pumpTask: Task<Void, Never>?
+    private var statusTask: Task<Void, Never>?
     private var loopbackAutoStopTask: Task<Void, Never>?
+    private var lastRevision: UInt64 = 0
+
+    /// Track whether we suppress the next persisted write during the
+    /// initial settings load (otherwise didSet would write the value
+    /// back to TOML on every refresh).
+    private var loadingSettings: Bool = true
 
     init() {
         if let cstr = speaker_core_version() {
             log.info("core version: \(String(cString: cstr), privacy: .public)")
         }
+        // Defaults so the @Published initialisers have a value. The real
+        // values overwrite these in `loadSettings()` below.
+        self.targetAddress = nil
+        self.forceDefaultOutput = false
+        self.vadSensitivity = .quality
+        self.model = ""
         apiKeyStored = (speaker_core_api_key_has() == 1)
-        refreshIdleStatus()
+        loadSettings()
+        loginItemEnabled = LoginItem.isEnabled()
+        refreshStatusFromCore()
         start()
+    }
+
+    // --- Settings persistence ---------------------------------------
+
+    private func loadSettings() {
+        loadingSettings = true
+        defer { loadingSettings = false }
+        guard let raw = speaker_core_settings_get() else { return }
+        defer { speaker_core_string_free(raw) }
+        let data = Data(bytes: raw, count: strlen(raw))
+        do {
+            let p = try JSONDecoder().decode(SettingsPayload.self, from: data)
+            self.targetAddress = p.targetAddress
+            self.forceDefaultOutput = p.forceDefaultOutput
+            self.model = p.model
+            if let s = VadSensitivity(tomlVariant: p.vadSensitivity) {
+                self.vadSensitivity = s
+            }
+            // Push the loaded target into the BT watcher so events get
+            // filtered correctly from first launch.
+            watcher.targetAddress = p.targetAddress
+        } catch {
+            log.error("decode settings failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private func persistTarget() {
+        guard !loadingSettings else { return }
+        watcher.targetAddress = targetAddress
+        let rc: Int32
+        if let addr = targetAddress {
+            rc = addr.withCString { speaker_core_settings_set_target($0) }
+        } else {
+            rc = speaker_core_settings_set_target(nil)
+        }
+        if rc != 0 { log.error("settings_set_target failed: \(rc)") }
+        refreshStatusFromCore()
+    }
+
+    private func persistForceDefaultOutput() {
+        guard !loadingSettings else { return }
+        let rc = speaker_core_settings_set_force_default_output(forceDefaultOutput ? 1 : 0)
+        if rc != 0 { log.error("settings_set_force_default_output failed: \(rc)") }
+    }
+
+    private func persistVadSensitivity() {
+        guard !loadingSettings else { return }
+        let rc = speaker_core_settings_set_vad_sensitivity(vadSensitivity.rawValue)
+        if rc != 0 { log.error("settings_set_vad_sensitivity failed: \(rc)") }
+    }
+
+    private func persistModel() {
+        guard !loadingSettings else { return }
+        guard !model.isEmpty else { return }
+        let rc = model.withCString { speaker_core_settings_set_model($0) }
+        if rc != 0 { log.error("settings_set_model failed: \(rc)") }
     }
 
     // --- API key (M5) -----------------------------------------------
 
-    /// Round-trips through the Rust core to the macOS Keychain. Empty
-    /// strings are rejected by the core; surface as a user-visible
-    /// error so the masked input field can react.
     @discardableResult
     func saveApiKey(_ key: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -109,8 +249,7 @@ final class Coordinator: ObservableObject {
         let rc = trimmed.withCString { speaker_core_api_key_set($0) }
         if rc == 0 {
             apiKeyStored = true
-            // Clear any prior "no api key" error so the menu bar refreshes.
-            if case .error = status { refreshIdleStatus() }
+            if case .error = status { refreshStatusFromCore() }
             return true
         }
         status = .error("Saving API key failed (code \(rc))")
@@ -128,11 +267,11 @@ final class Coordinator: ObservableObject {
         return false
     }
 
-    // --- Manual session (M5) ----------------------------------------
+    // --- Sessions (manual + simulated) ------------------------------
 
     func toggleManualSession() {
-        if manualSessionRunning {
-            stopManualSession()
+        if status.manualSessionInFlight {
+            pushCommand(stop: true)
         } else {
             startManualSession()
         }
@@ -141,12 +280,12 @@ final class Coordinator: ObservableObject {
     private func startManualSession() {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            beginManualSession()
+            pushCommand(stop: false)
         case .notDetermined:
             Task { @MainActor in
                 let granted = await AVCaptureDevice.requestAccess(for: .audio)
                 if granted {
-                    self.beginManualSession()
+                    self.pushCommand(stop: false)
                 } else {
                     self.status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
                 }
@@ -158,48 +297,58 @@ final class Coordinator: ObservableObject {
         }
     }
 
-    private func beginManualSession() {
+    private func pushCommand(stop: Bool) {
         speaker_core_last_session_error_clear()
-        let rc = speaker_core_manual_session_start(vadSensitivity.rawValue, nil)
-        guard rc == 0 else {
-            // Distinct typed messages per CLAUDE.md "Surface session
-            // failures explicitly". The Rust side already wrote a
-            // human-readable message; prefer it when available.
-            status = .error(menuMessage(for: rc))
-            return
-        }
-        manualSessionRunning = true
-        status = .manualSessionActive
-    }
-
-    private func stopManualSession() {
-        speaker_core_manual_session_stop()
-        manualSessionRunning = false
-        // The Gemini WS task may have died asynchronously and left a
-        // tagged error behind; surface it now rather than silently
-        // dropping back to idle.
+        let raw = speaker_core_coord_push_command(stop ? 1 : 0)
+        applyStatusJSON(raw)
+        if let raw = raw { speaker_core_string_free(raw) }
+        // If a launch failed synchronously (no API key), the coordinator
+        // is back at Idle; surface the captured error so the user sees why.
         let code = speaker_core_last_session_error_code()
         if code != 0 {
             status = .error(menuMessage(for: code))
             speaker_core_last_session_error_clear()
-        } else {
-            refreshIdleStatus()
         }
     }
 
-    private func menuMessage(for code: Int32) -> String {
-        // Prefer the core's message (already human-readable).
-        if let raw = speaker_core_last_session_error_message() {
-            defer { speaker_core_string_free(raw) }
-            return String(cString: raw)
+    /// Wired to "Test now" in Settings — simulates a BT connect for the
+    /// configured target, runs the session for a couple of seconds, then
+    /// simulates a disconnect to exercise the teardown path too.
+    func runTestNow() {
+        guard targetAddress != nil else {
+            status = .error("Set a target speaker first")
+            return
         }
-        switch code {
-        case -300: return "No API key — open Settings"
-        case -301: return "Gemini auth failed — check API key"
-        case -302: return "Network error — will retry on next connect"
-        case -303: return "Gemini blocked the response (safety)"
-        case -101: return "Invalid VAD sensitivity"
-        default: return "Session failed (code \(code))"
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            beginTestNow()
+        case .notDetermined:
+            Task { @MainActor in
+                let granted = await AVCaptureDevice.requestAccess(for: .audio)
+                if granted { self.beginTestNow() }
+                else {
+                    self.status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
+                }
+            }
+        case .denied, .restricted:
+            status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
+        @unknown default:
+            status = .error("Microphone access unavailable")
+        }
+    }
+
+    private func beginTestNow() {
+        speaker_core_last_session_error_clear()
+        let raw = speaker_core_coord_simulate_connect()
+        applyStatusJSON(raw)
+        if let raw = raw { speaker_core_string_free(raw) }
+        // Give the session ~3 s of real audio time, then simulate the
+        // disconnect that tears it down.
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            let raw = speaker_core_coord_simulate_disconnect()
+            self.applyStatusJSON(raw)
+            if let raw = raw { speaker_core_string_free(raw) }
         }
     }
 
@@ -220,8 +369,6 @@ final class Coordinator: ObservableObject {
     }
 
     private func startVadDiagnostic() {
-        // Same permission gate as the loopback diagnostic — both capture
-        // from the default input, so the prompt logic is identical.
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             beginVadDiagnostic()
@@ -256,10 +403,6 @@ final class Coordinator: ObservableObject {
     }
 
     private func startLoopback() {
-        // Explicit permission check so a denied state surfaces as a
-        // human-readable message instead of a cpal stream-build error
-        // code. On .notDetermined this is also what triggers the
-        // NSMicrophoneUsageDescription system prompt on first capture.
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             beginLoopbackStream()
@@ -283,9 +426,6 @@ final class Coordinator: ObservableObject {
         if forceDefaultOutput, let addr = targetAddress {
             let rc = addr.withCString { speaker_core_audio_force_default_output($0) }
             if rc != 0 {
-                // Don't abort loopback — the user may want to hear what
-                // routing does in the default state. Surface the failure
-                // so they know the toggle didn't apply this run.
                 log.warning("force-default-output failed (code \(rc, privacy: .public))")
             }
         }
@@ -312,8 +452,24 @@ final class Coordinator: ObservableObject {
         loopbackAutoStopTask = nil
         speaker_core_audio_loopback_stop()
         loopbackRunning = false
-        refreshIdleStatus()
+        refreshStatusFromCore()
     }
+
+    // --- Login item -------------------------------------------------
+
+    func setLoginItemEnabled(_ enabled: Bool) {
+        loginItemError = nil
+        do {
+            try LoginItem.setEnabled(enabled)
+            loginItemEnabled = LoginItem.isEnabled()
+        } catch {
+            loginItemError = error.localizedDescription
+            loginItemEnabled = LoginItem.isEnabled()
+            log.error("login item toggle failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    // --- Lifecycle / event pump -------------------------------------
 
     func start() {
         watcher.start()
@@ -324,11 +480,22 @@ final class Coordinator: ObservableObject {
                 await self.handle(event)
             }
         }
+        statusTask?.cancel()
+        let interval = Self.statusPollInterval
+        statusTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+                guard let self else { return }
+                await MainActor.run { self.refreshStatusFromCore() }
+            }
+        }
     }
 
     func stop() {
         pumpTask?.cancel()
         pumpTask = nil
+        statusTask?.cancel()
+        statusTask = nil
         watcher.stop()
     }
 
@@ -336,23 +503,85 @@ final class Coordinator: ObservableObject {
         watcher.pairedDevices()
     }
 
+    /// Forwards an OS-level BT event into the Rust coordinator. The
+    /// returned status JSON is decoded and applied.
     private func handle(_ event: BTEvent) {
+        let raw: UnsafeMutablePointer<CChar>?
         switch event {
         case .connected(let address, let name):
             log.info("bt connected: \(name, privacy: .public) [\(address, privacy: .public)]")
-            status = .sessionActive(name: name)
+            raw = address.withCString { addrPtr in
+                name.withCString { namePtr in
+                    speaker_core_coord_push_bt_connect(addrPtr, namePtr)
+                }
+            }
         case .disconnected(let address, let name):
             log.info("bt disconnected: \(name, privacy: .public) [\(address, privacy: .public)]")
-            status = .waitingForDevice(name: name)
+            raw = address.withCString { addrPtr in
+                name.withCString { namePtr in
+                    speaker_core_coord_push_bt_disconnect(addrPtr, namePtr)
+                }
+            }
+        }
+        applyStatusJSON(raw)
+        if let raw = raw { speaker_core_string_free(raw) }
+    }
+
+    /// Pull a fresh status from the core. Cheap: a revision check skips
+    /// the JSON decode when nothing has changed.
+    private func refreshStatusFromCore() {
+        let rev = speaker_core_coord_revision()
+        if rev == lastRevision && status != .idle { return }
+        lastRevision = rev
+        guard let raw = speaker_core_coord_status() else { return }
+        applyStatusJSON(raw)
+        speaker_core_string_free(raw)
+        // Surface any async error that the gemini task left behind.
+        let code = speaker_core_last_session_error_code()
+        if code != 0 {
+            status = .error(menuMessage(for: code))
+            speaker_core_last_session_error_clear()
         }
     }
 
-    private func refreshIdleStatus() {
-        if let addr = targetAddress {
-            let name = watcher.pairedDevices().first(where: { $0.address == addr })?.name ?? addr
-            status = .waitingForDevice(name: name)
-        } else {
-            status = .noDeviceSelected
+    private func applyStatusJSON(_ raw: UnsafeMutablePointer<CChar>?) {
+        guard let raw else { return }
+        let data = Data(bytes: raw, count: strlen(raw))
+        do {
+            let p = try JSONDecoder().decode(StatusPayload.self, from: data)
+            status = Self.statusEvent(from: p)
+        } catch {
+            log.error("decode status failed: \(error.localizedDescription, privacy: .public)")
+        }
+    }
+
+    private static func statusEvent(from p: StatusPayload) -> StatusEvent {
+        switch p.variant {
+        case "idle": return .idle
+        case "no_device_selected": return .noDeviceSelected
+        case "waiting_for_device": return .waitingForDevice(name: p.name ?? "")
+        case "session_launching": return .sessionLaunching(name: p.name ?? "")
+        case "session_active": return .sessionActive(name: p.name ?? "")
+        case "manual_session_launching": return .manualSessionLaunching
+        case "manual_session_active": return .manualSessionActive
+        case "tearing_down": return .tearingDown(name: p.name ?? "")
+        case "error": return .error(p.message ?? "Unknown error")
+        default: return .idle
+        }
+    }
+
+    private func menuMessage(for code: Int32) -> String {
+        if let raw = speaker_core_last_session_error_message() {
+            defer { speaker_core_string_free(raw) }
+            return String(cString: raw)
+        }
+        switch code {
+        case -300: return "No API key — open Settings"
+        case -301: return "Gemini auth failed — check API key"
+        case -302: return "Network error — will retry on next connect"
+        case -303: return "Gemini blocked the response (safety)"
+        case -101: return "Invalid VAD sensitivity"
+        default: return "Session failed (code \(code))"
         }
     }
 }

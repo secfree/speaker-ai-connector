@@ -391,48 +391,85 @@ pub fn stop_vad_diagnostic() {
     *guard = None;
 }
 
-// --- Manual session (M5) --------------------------------------------
+// --- AI session (M5 + M6) -------------------------------------------
 //
 // Full capture → VAD → Gemini Live → playback loop, exercised end-to-end
-// against the default input/output. This is the developer/debug path the
-// design calls out: it proves the AI pipeline works without depending on
-// a Bluetooth speaker connecting. The polished menu-bar Start/Stop UX
-// (disabled-while-BT, status surfaces) is M6.
+// against the default input/output. M5 only used this for the
+// developer/debug "manual" path; M6 also drives it from the coordinator
+// when a Bluetooth speaker connects. The `trigger`/`target_address`
+// params are recorded in the session manifest so the Sessions view can
+// distinguish them.
 //
 // Lifecycle:
-//   start_manual_session()
-//     ├─ SessionRecorder.start_session(Manual, …, 16 kHz)
+//   start_session()
+//     ├─ SessionRecorder.start_session(trigger, target_address, 16 kHz)
 //     ├─ GeminiSession.start(api_key)        ← blocks ≤15 s on connect
 //     ├─ output stream: queue → device-rate stereo f32
 //     └─ input stream:  device → 16 kHz mono i16 → VAD → upload + clip
-//   stop_manual_session()
+//   stop_session()
 //     ├─ drop streams (CoreAudio callbacks released)
 //     ├─ drop GeminiSession (clean WS close, thread join)
 //     └─ recorder.end_session()  (best-effort flush of an open clip)
 
-struct ManualHandle {
+struct SessionHandle {
     _input: Stream,
     _output: Stream,
     _gemini: GeminiSession,
 }
 
-unsafe impl Send for ManualHandle {}
+unsafe impl Send for SessionHandle {}
 
-fn manual_slot() -> &'static Mutex<Option<ManualHandle>> {
-    static SLOT: OnceLock<Mutex<Option<ManualHandle>>> = OnceLock::new();
+fn session_slot() -> &'static Mutex<Option<SessionHandle>> {
+    static SLOT: OnceLock<Mutex<Option<SessionHandle>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Optional teardown callback fired when the in-flight session dies
+/// asynchronously (Gemini Error / Closed). The coordinator registers this
+/// so it can transition Active → TearingDown → Idle without polling.
+type TeardownCallback = Arc<dyn Fn() + Send + Sync + 'static>;
+fn teardown_cb_slot() -> &'static Mutex<Option<TeardownCallback>> {
+    static SLOT: OnceLock<Mutex<Option<TeardownCallback>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Set the callback fired when the in-flight session collapses
+/// asynchronously. Passing `None` clears it. Idempotent — overwrites
+/// any previously registered callback.
+pub fn set_async_teardown_callback(cb: Option<TeardownCallback>) {
+    *teardown_cb_slot().lock().unwrap() = cb;
+}
+
+fn fire_async_teardown() {
+    let cb = teardown_cb_slot().lock().unwrap().clone();
+    if let Some(cb) = cb {
+        cb();
+    }
 }
 
 /// Bounded so a runaway response can't pin unbounded memory. ~5 s of
 /// 24 kHz mono i16 = 240 kB — well under any reasonable response burst.
 const PLAYBACK_QUEUE_CAP_SAMPLES: usize = 24_000 * 5;
 
+/// Convenience wrapper for the manual path (kept so the FFI surface
+/// stays stable). Manual sessions have no target address and use the
+/// `Manual` trigger so the manifest reads `"trigger": "manual"`.
 pub fn start_manual_session(
     api_key: String,
     model: String,
     sensitivity: Sensitivity,
 ) -> Result<(), AudioError> {
-    let mut guard = manual_slot().lock().unwrap();
+    start_session(api_key, model, sensitivity, SessionTrigger::Manual, None)
+}
+
+pub fn start_session(
+    api_key: String,
+    model: String,
+    sensitivity: Sensitivity,
+    trigger: SessionTrigger,
+    target_address: Option<String>,
+) -> Result<(), AudioError> {
+    let mut guard = session_slot().lock().unwrap();
     if guard.is_some() {
         return Err(AudioError::AlreadyRunning);
     }
@@ -458,17 +495,17 @@ pub fn start_manual_session(
     let output_rate = output_cfg.sample_rate().0;
     let output_channels = output_cfg.channels() as usize;
     eprintln!(
-        "speaker-core: manual session input {}Hz/{}ch → relay {}Hz/1ch ({:?}); output queue {}Hz/1ch → {}Hz/{}ch",
-        input_rate, input_channels, INPUT_SAMPLE_RATE, sensitivity, OUTPUT_SAMPLE_RATE, output_rate, output_channels
+        "speaker-core: session({:?}) input {}Hz/{}ch → relay {}Hz/1ch ({:?}); output queue {}Hz/1ch → {}Hz/{}ch",
+        trigger, input_rate, input_channels, INPUT_SAMPLE_RATE, sensitivity, OUTPUT_SAMPLE_RATE, output_rate, output_channels
     );
 
     // Open the on-disk session before connecting Gemini — if the recorder
     // can't open, we want the failure before any network spend.
     let recorder = SessionRecorder::instance();
     recorder
-        .start_session(SessionTrigger::Manual, None, INPUT_SAMPLE_RATE)
+        .start_session(trigger, target_address.clone(), INPUT_SAMPLE_RATE)
         .map_err(|e| {
-            eprintln!("speaker-core: manual session start_session failed: {e:?}");
+            eprintln!("speaker-core: session recorder start failed: {e:?}");
             AudioError::StreamStartFailed(format!("recorder: {e:?}"))
         })?;
 
@@ -700,7 +737,7 @@ pub fn start_manual_session(
         .play()
         .map_err(|e| AudioError::StreamStartFailed(format!("manual output: {e}")))?;
 
-    *guard = Some(ManualHandle {
+    *guard = Some(SessionHandle {
         _input: input_stream,
         _output: output_stream,
         _gemini: gemini,
@@ -709,24 +746,30 @@ pub fn start_manual_session(
 }
 
 pub fn stop_manual_session() {
-    let mut guard = manual_slot().lock().unwrap();
+    stop_session()
+}
+
+pub fn stop_session() {
+    let mut guard = session_slot().lock().unwrap();
     // Drop order matters: streams first (release CoreAudio callbacks that
     // hold the upload handle), then GeminiSession (joins its thread).
     *guard = None;
     let recorder = SessionRecorder::instance();
     if recorder.is_active() {
         if let Err(e) = recorder.end_session() {
-            eprintln!("speaker-core: manual end_session failed: {e:?}");
+            eprintln!("speaker-core: session end failed: {e:?}");
         }
     }
 }
 
 /// Fire-and-forget teardown for a session whose Gemini connection has
 /// died. Called from the sink callback (which runs on the gemini
-/// thread); we *can't* call `stop_manual_session` inline because
-/// dropping `GeminiSession` joins that same thread → deadlock. The
-/// `dead` flag also serves as the once-only latch so an Error frame
-/// followed by Closed doesn't spawn two teardown threads.
+/// thread); we *can't* call `stop_session` inline because dropping
+/// `GeminiSession` joins that same thread → deadlock. The `dead` flag
+/// also serves as the once-only latch so an Error frame followed by
+/// Closed doesn't spawn two teardown threads. We also fire the
+/// coordinator's async-teardown callback so the state machine sees
+/// the transition without polling.
 fn schedule_manual_teardown(dead: &Arc<AtomicBool>) {
     if dead
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -735,8 +778,11 @@ fn schedule_manual_teardown(dead: &Arc<AtomicBool>) {
         return;
     }
     std::thread::Builder::new()
-        .name("manual-teardown".into())
-        .spawn(stop_manual_session)
+        .name("session-teardown".into())
+        .spawn(|| {
+            stop_session();
+            fire_async_teardown();
+        })
         .ok();
 }
 

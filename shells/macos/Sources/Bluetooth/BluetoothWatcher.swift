@@ -5,9 +5,9 @@ import IOBluetooth
 ///
 /// This stays in the macOS shell — `IOBluetooth` is Apple-only and the
 /// equivalent on Windows is `Windows.Devices.Bluetooth`. The shell
-/// normalizes events into `BTEvent`s and (post-M5) forwards them to the
-/// Rust core over FFI; the core owns debounce and the session state
-/// machine.
+/// normalizes events into `BTEvent`s and forwards them to the Rust core
+/// over FFI; the core owns debounce (5 s default, configurable in M7)
+/// and the session state machine.
 struct PairedDevice: Identifiable, Hashable {
     let address: String
     let name: String
@@ -23,13 +23,11 @@ enum BTEvent {
 final class BluetoothWatcher: NSObject {
     private var connectObserver: IOBluetoothUserNotification?
     private var disconnectObservers: [String: IOBluetoothUserNotification] = [:]
-    private var lastConnectAt: [String: Date] = [:]
 
     private var continuation: AsyncStream<BTEvent>.Continuation?
     let events: AsyncStream<BTEvent>
 
     var targetAddress: String?
-    var debounceSeconds: TimeInterval = 5
 
     override init() {
         var cont: AsyncStream<BTEvent>.Continuation!
@@ -67,11 +65,6 @@ final class BluetoothWatcher: NSObject {
         let name = device.name ?? addr
 
         guard let target = targetAddress, normalize(target) == addr else { return }
-
-        if let last = lastConnectAt[addr], Date().timeIntervalSince(last) < debounceSeconds {
-            return
-        }
-        lastConnectAt[addr] = Date()
 
         if disconnectObservers[addr] == nil {
             disconnectObservers[addr] = device.register(

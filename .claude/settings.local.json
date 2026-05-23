@@ -28,7 +28,9 @@
       "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build CODE_SIGNING_ALLOWED=NO)",
       "Bash(cargo clippy *)",
       "Bash(cargo check *)",
-      "Bash(xcodebuild -project shells/macos/SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build)"
+      "Bash(xcodebuild -project shells/macos/SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build)",
+      "Bash(cargo metadata *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('toml' in [p['name'] for p in d['packages']]\\)\")"
     ]
   }
 }

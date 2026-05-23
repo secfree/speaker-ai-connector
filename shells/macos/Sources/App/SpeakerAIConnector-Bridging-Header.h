@@ -2,8 +2,10 @@
 #define SPEAKER_AI_CONNECTOR_BRIDGING_HEADER_H
 
 // Hand-rolled C ABI to the Rust core (core/speaker-core).
-// Long-term binding strategy (uniffi vs. swift-bridge vs. hand-rolled)
-// is an M5 decision; this header stays small and explicit until then.
+// FFI binding strategy decided in M6: hand-written stays. The surface
+// is small enough (~25 functions) that codegen tools like uniffi or
+// swift-bridge would add build cost for little benefit. See
+// docs/v0.1-design.md §"FFI surface".
 
 const char *speaker_core_version(void);
 
@@ -93,5 +95,53 @@ int speaker_core_last_session_error_code(void);
 char *speaker_core_last_session_error_message(void);
 char *speaker_core_last_session_error_tag(void);
 void speaker_core_last_session_error_clear(void);
+
+// --- Coordinator (M6) -----------------------------------------------
+// BTEvent in / SessionCommand in / StatusEvent JSON out. Returned
+// strings must be freed with speaker_core_string_free.
+//
+// StatusEvent JSON shape:
+//   { "variant": "idle" | "no_device_selected" | "waiting_for_device"
+//              | "session_launching" | "session_active"
+//              | "manual_session_launching" | "manual_session_active"
+//              | "tearing_down" | "error",
+//     "name": "..."    (waiting_for_device / launching / active / tearing_down)
+//     "message": "..." (error only)
+//   }
+
+char *speaker_core_coord_push_bt_connect(const char *address, const char *name);
+char *speaker_core_coord_push_bt_disconnect(const char *address, const char *name);
+
+// command: 0 = Start, 1 = Stop (anything else treated as Stop).
+char *speaker_core_coord_push_command(int command);
+
+// Current status snapshot (no state change). Caller frees the JSON.
+char *speaker_core_coord_status(void);
+
+// Monotonic revision counter — bumps on every state change. Cheap;
+// poll this on a timer to skip JSON decode when nothing has changed.
+unsigned long long speaker_core_coord_revision(void);
+
+// Test-now helpers: simulate a connect/disconnect for the configured target.
+char *speaker_core_coord_simulate_connect(void);
+char *speaker_core_coord_simulate_disconnect(void);
+
+// --- Non-secret settings (M6) ---------------------------------------
+// TOML at <data-dir>/config.toml. JSON shape:
+//   { "target_address": "aa:bb:..." | null,
+//     "model": "models/gemini-...",
+//     "vad_sensitivity": "Quality" | "LowBitrate" | "Aggressive" | "VeryAggressive",
+//     "silence_timeout_ms": 700,
+//     "force_default_output": false }
+char *speaker_core_settings_get(void);
+
+// All setters persist to TOML and refresh the coordinator's cached
+// snapshot. Return 0 on success, negative ConfigError code on failure
+// (-100 invalid input, -101 invalid sensitivity, -402 io, -403 toml).
+int speaker_core_settings_set_target(const char *address);   // NULL clears
+int speaker_core_settings_set_model(const char *model);
+int speaker_core_settings_set_vad_sensitivity(unsigned char level);
+int speaker_core_settings_set_silence_timeout_ms(unsigned int ms);
+int speaker_core_settings_set_force_default_output(int enabled);
 
 #endif

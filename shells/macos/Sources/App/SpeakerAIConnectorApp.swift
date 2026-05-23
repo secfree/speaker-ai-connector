@@ -9,6 +9,8 @@ struct SpeakerAIConnectorApp: App {
             MenuContent()
                 .environmentObject(coordinator)
         } label: {
+            // SF Symbol picked from the status so the menu-bar glyph
+            // reflects the in-flight session at a glance.
             Image(systemName: menuIcon(for: coordinator.status))
         }
         .menuBarExtraStyle(.menu)
@@ -28,8 +30,10 @@ struct SpeakerAIConnectorApp: App {
     private func menuIcon(for status: StatusEvent) -> String {
         switch status {
         case .sessionActive: return "dot.radiowaves.left.and.right"
-        case .manualSessionActive: return "mic.fill"
         case .sessionLaunching: return "arrow.triangle.2.circlepath"
+        case .manualSessionActive: return "mic.fill"
+        case .manualSessionLaunching: return "mic.badge.plus"
+        case .tearingDown: return "arrow.down.circle"
         case .error: return "exclamationmark.triangle"
         case .noDeviceSelected: return "questionmark.circle"
         case .waitingForDevice, .idle: return "speaker.wave.2"
@@ -45,12 +49,10 @@ struct MenuContent: View {
     var body: some View {
         Text(coordinator.status.menuBarText)
         Divider()
-        // M5: manual session is a developer/debug affordance — the
-        // polished disabled-while-BT-active behavior lands in M6.
-        Button(coordinator.manualSessionRunning ? "Stop session" : "Start session") {
+        Button(startStopLabel) {
             coordinator.toggleManualSession()
         }
-        .disabled(!coordinator.apiKeyStored && !coordinator.manualSessionRunning)
+        .disabled(!startStopEnabled)
         Button("Sessions…") {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: "sessions")
@@ -63,5 +65,24 @@ struct MenuContent: View {
         Divider()
         Button("Quit") { NSApp.terminate(nil) }
             .keyboardShortcut("q")
+    }
+
+    private var startStopLabel: String {
+        if coordinator.status.manualSessionInFlight {
+            return "Stop session"
+        }
+        if coordinator.status.bluetoothSessionInFlight {
+            // Speaker owns the audio path — relabel so the user
+            // understands why the item is disabled.
+            return "Start session (speaker connected)"
+        }
+        return "Start session"
+    }
+
+    private var startStopEnabled: Bool {
+        if coordinator.status.bluetoothSessionInFlight { return false }
+        if coordinator.status.manualSessionInFlight { return true }
+        // Need a stored API key for Gemini Live to handshake.
+        return coordinator.apiKeyStored
     }
 }
