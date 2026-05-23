@@ -42,6 +42,9 @@ final class Coordinator: ObservableObject {
     private var pumpTask: Task<Void, Never>?
 
     init() {
+        if let cstr = speaker_core_version() {
+            print("[speaker] core version: \(String(cString: cstr))")
+        }
         refreshIdleStatus()
         start()
     }
@@ -84,9 +87,11 @@ final class Coordinator: ObservableObject {
 
     private func handle(_ event: BTEvent) {
         switch event {
-        case .connected(_, let name):
+        case .connected(let address, let name):
+            print("[speaker] bt connected: \(name) [\(address)]")
             status = .sessionActive(name: name)
-        case .disconnected(_, let name):
+        case .disconnected(let address, let name):
+            print("[speaker] bt disconnected: \(name) [\(address)]")
             status = .waitingForDevice(name: name)
         }
     }

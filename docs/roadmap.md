@@ -16,16 +16,16 @@ expanding the original.
 - [done] Stub out `coordinator.rs`, `audio.rs`, `vad.rs`, `gemini.rs`, `config.rs`, `ffi.rs`.
 - [done] Define `BTEvent` and `StatusEvent` enums in the coordinator.
 - [done] Implement minimal `Coordinator` (target address + connect/disconnect → status).
-- [todo] Add a `SessionCommand::{Start, Stop}` input to the coordinator for manual session triggering (rejected while a Bluetooth-driven session is active; speaker-connect during a manual session tears it down and re-launches).
+- [done] Add a `SessionCommand::{Start, Stop}` input to the coordinator for manual session triggering (rejected while a Bluetooth-driven session is active; speaker-connect during a manual session tears it down and re-launches).
 - [done] Create `shells/macos/project.yml` (XcodeGen) with Info.plist + entitlements.
 - [done] Scaffold SwiftUI `@main` app with `MenuBarExtra`.
 - [done] Implement `BluetoothWatcher.swift` (`IOBluetooth` connect/disconnect for paired devices).
 - [done] Add placeholder Swift `Coordinator` and `SettingsView` mirroring the Rust types.
-- [todo] Expose `speaker_core_version()` over a C ABI from `ffi.rs` (just enough to prove the link).
-- [todo] Wire the macOS shell's build to link `libspeaker_core.a` and call `speaker_core_version()` on launch.
-- [todo] Log Bluetooth connect/disconnect events to the console from the shell, filtered by the address picked in Settings.
-- [todo] Add a top-level `justfile` (or `Makefile`) wrapping `cargo build` + `xcodegen generate` so contributors don't have to remember the order.
-- [todo] Unit tests for `Coordinator::handle` (target match, non-target ignored, no-target state, manual-start gated by speaker state, speaker-connect preempts manual session).
+- [done] Expose `speaker_core_version()` over a C ABI from `ffi.rs` (just enough to prove the link).
+- [done] Wire the macOS shell's build to link `libspeaker_core.a` and call `speaker_core_version()` on launch.
+- [done] Log Bluetooth connect/disconnect events to the console from the shell, filtered by the address picked in Settings.
+- [done] Add a top-level `justfile` (or `Makefile`) wrapping `cargo build` + `xcodegen generate` so contributors don't have to remember the order.
+- [done] Unit tests for `Coordinator::handle` (target match, non-target ignored, no-target state, manual-start gated by speaker state, speaker-connect preempts manual session).
 - [todo] Verify M1 on real hardware: pair a speaker, see connect/disconnect events appear in the log when toggling its power.
 
 ## M2 — Audio capture + playback round-trip via `cpal`

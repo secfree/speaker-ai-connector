@@ -13,7 +13,11 @@
       "Bash(rustc --version)",
       "Bash(cargo --version)",
       "Bash(rustup show *)",
-      "Bash(xargs ls -la)"
+      "Bash(xargs ls -la)",
+      "Bash(cargo test *)",
+      "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build)",
+      "Bash(make test *)",
+      "Bash(make build *)"
     ]
   }
 }

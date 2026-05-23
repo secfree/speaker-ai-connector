@@ -16,4 +16,4 @@ pub mod config;
 pub mod gemini;
 pub mod vad;
 
-pub use coordinator::{BTEvent, Coordinator, StatusEvent};
+pub use coordinator::{BTEvent, Coordinator, SessionCommand, StatusEvent};
