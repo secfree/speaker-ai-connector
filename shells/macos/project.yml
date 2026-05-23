@@ -20,6 +20,27 @@ targets:
     platform: macOS
     sources:
       - path: Sources
+        excludes:
+          - "App/SpeakerAIConnector-Bridging-Header.h"
+    preBuildScripts:
+      - name: Build Rust core
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          export PATH="$HOME/.cargo/bin:$PATH"
+          CARGO_PROFILE="debug"
+          CARGO_FLAGS=""
+          if [ "${CONFIGURATION}" = "Release" ]; then
+            CARGO_PROFILE="release"
+            CARGO_FLAGS="--release"
+          fi
+          cd "${SRCROOT}/../../core"
+          cargo build ${CARGO_FLAGS}
+    dependencies:
+      - sdk: AudioUnit.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreAudio.framework
+      - sdk: CoreFoundation.framework
     info:
       path: Sources/App/Info.plist
       properties:
@@ -46,3 +67,12 @@ targets:
         CODE_SIGN_IDENTITY: "-"
         DEVELOPMENT_TEAM: ""
         COMBINE_HIDPI_IMAGES: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/App/SpeakerAIConnector-Bridging-Header.h
+        LIBRARY_SEARCH_PATHS:
+          - $(SRCROOT)/../../core/target/debug
+        OTHER_LDFLAGS:
+          - -lspeaker_core
+      configs:
+        Release:
+          LIBRARY_SEARCH_PATHS:
+            - $(SRCROOT)/../../core/target/release

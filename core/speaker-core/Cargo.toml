@@ -10,3 +10,4 @@ name = "speaker_core"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+cpal = "0.15"

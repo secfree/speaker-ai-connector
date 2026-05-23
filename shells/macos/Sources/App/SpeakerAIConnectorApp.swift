@@ -32,13 +32,16 @@ struct SpeakerAIConnectorApp: App {
 
 struct MenuContent: View {
     @EnvironmentObject var coordinator: Coordinator
+    @Environment(\.openSettings) private var openSettings
 
     var body: some View {
         Text(coordinator.status.menuBarText)
         Divider()
-        SettingsLink {
-            Text("Settings…")
+        Button("Settings…") {
+            NSApp.activate(ignoringOtherApps: true)
+            openSettings()
         }
+        .keyboardShortcut(",")
         Divider()
         Button("Quit") { NSApp.terminate(nil) }
             .keyboardShortcut("q")

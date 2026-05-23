@@ -6,7 +6,14 @@
       "Bash(xcodegen generate *)",
       "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug -destination 'platform=macOS' build)",
       "Bash(cargo build *)",
-      "Bash(command -v xcodegen)"
+      "Bash(command -v xcodegen)",
+      "Bash(xcodebuild -version)",
+      "Bash(xcode-select -p)",
+      "Read(//Applications/**)",
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(rustup show *)",
+      "Bash(xargs ls -la)"
     ]
   }
 }

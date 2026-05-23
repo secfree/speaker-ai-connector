@@ -29,6 +29,7 @@ enum StatusEvent: Equatable {
 @MainActor
 final class Coordinator: ObservableObject {
     @Published private(set) var status: StatusEvent = .idle
+    @Published private(set) var loopbackRunning: Bool = false
     @Published var targetAddress: String? {
         didSet {
             watcher.targetAddress = targetAddress
@@ -43,6 +44,21 @@ final class Coordinator: ObservableObject {
     init() {
         refreshIdleStatus()
         start()
+    }
+
+    func toggleLoopback() {
+        if loopbackRunning {
+            speaker_core_audio_loopback_stop()
+            loopbackRunning = false
+            refreshIdleStatus()
+        } else {
+            let rc = speaker_core_audio_loopback_start()
+            if rc == 0 {
+                loopbackRunning = true
+            } else {
+                status = .error("Audio loopback failed (code \(rc))")
+            }
+        }
     }
 
     func start() {

@@ -24,6 +24,15 @@ struct SettingsView: View {
                 Text(coordinator.status.menuBarText)
                     .font(.system(.body, design: .monospaced))
             }
+
+            Section("Diagnostics") {
+                Button(coordinator.loopbackRunning ? "Stop audio loopback" : "Start audio loopback") {
+                    coordinator.toggleLoopback()
+                }
+                Text("Plays your default input back through the default output.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
         .padding(20)
         .frame(width: 420)
