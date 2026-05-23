@@ -18,4 +18,14 @@ void speaker_core_audio_loopback_stop(void);
 // (-20 CoreAudio failure, -21 no matching device, -100 bad address).
 int speaker_core_audio_force_default_output(const char *address);
 
+// Start the M3 VAD diagnostic: default input → 16 kHz mono → libfvad
+// relay, logging gate open/close transitions to stderr. `sensitivity`
+// is 0..=3 (Quality, LowBitrate, Aggressive, VeryAggressive). Returns
+// 0 on success, -101 if sensitivity is out of range, or a negative
+// AudioError code on capture failure.
+int speaker_core_vad_diagnostic_start(unsigned char sensitivity);
+
+// Safe to call when no diagnostic is running.
+void speaker_core_vad_diagnostic_stop(void);
+
 #endif

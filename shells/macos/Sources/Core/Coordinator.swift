@@ -30,10 +30,32 @@ enum StatusEvent: Equatable {
     }
 }
 
+/// Mirrors `speaker_core::vad::Sensitivity`. Four levels, lowest is
+/// most permissive (Quality) — kid voices are quiet enough that the
+/// default sits at the lenient end.
+enum VadSensitivity: UInt8, CaseIterable, Identifiable {
+    case quality = 0
+    case lowBitrate = 1
+    case aggressive = 2
+    case veryAggressive = 3
+
+    var id: UInt8 { rawValue }
+
+    var label: String {
+        switch self {
+        case .quality: return "Quality (most permissive)"
+        case .lowBitrate: return "Low bitrate"
+        case .aggressive: return "Aggressive"
+        case .veryAggressive: return "Very aggressive (most restrictive)"
+        }
+    }
+}
+
 @MainActor
 final class Coordinator: ObservableObject {
     @Published private(set) var status: StatusEvent = .idle
     @Published private(set) var loopbackRunning: Bool = false
+    @Published private(set) var vadDiagnosticRunning: Bool = false
     @Published var targetAddress: String? {
         didSet {
             watcher.targetAddress = targetAddress
@@ -44,6 +66,10 @@ final class Coordinator: ObservableObject {
     /// output to the target speaker before a session starts. In-memory
     /// only for M2; persistence to TOML lands in M5.
     @Published var forceDefaultOutput: Bool = false
+    /// In-memory only for M3; persistence to TOML lands in M5. Changes
+    /// during a running diagnostic only take effect on the next start —
+    /// libfvad's mode applies at relay construction time.
+    @Published var vadSensitivity: VadSensitivity = .quality
 
     let watcher = BluetoothWatcher()
 
@@ -69,6 +95,50 @@ final class Coordinator: ObservableObject {
         } else {
             startLoopback()
         }
+    }
+
+    func toggleVadDiagnostic() {
+        if vadDiagnosticRunning {
+            stopVadDiagnostic()
+        } else {
+            startVadDiagnostic()
+        }
+    }
+
+    private func startVadDiagnostic() {
+        // Same permission gate as the loopback diagnostic — both capture
+        // from the default input, so the prompt logic is identical.
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            beginVadDiagnostic()
+        case .notDetermined:
+            Task { @MainActor in
+                let granted = await AVCaptureDevice.requestAccess(for: .audio)
+                if granted {
+                    self.beginVadDiagnostic()
+                } else {
+                    self.status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
+                }
+            }
+        case .denied, .restricted:
+            status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
+        @unknown default:
+            status = .error("Microphone access unavailable")
+        }
+    }
+
+    private func beginVadDiagnostic() {
+        let rc = speaker_core_vad_diagnostic_start(vadSensitivity.rawValue)
+        guard rc == 0 else {
+            status = .error("VAD diagnostic failed (code \(rc))")
+            return
+        }
+        vadDiagnosticRunning = true
+    }
+
+    private func stopVadDiagnostic() {
+        speaker_core_vad_diagnostic_stop()
+        vadDiagnosticRunning = false
     }
 
     private func startLoopback() {

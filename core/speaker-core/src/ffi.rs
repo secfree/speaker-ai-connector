@@ -14,6 +14,7 @@ use std::ffi::{c_char, CStr};
 use crate::audio;
 #[cfg(target_os = "macos")]
 use crate::routing;
+use crate::vad::Sensitivity;
 
 #[no_mangle]
 pub extern "C" fn speaker_core_version() -> *const c_char {
@@ -36,6 +37,33 @@ pub extern "C" fn speaker_core_audio_loopback_start() -> i32 {
 #[no_mangle]
 pub extern "C" fn speaker_core_audio_loopback_stop() {
     audio::stop_loopback();
+}
+
+/// Run the M3 VAD diagnostic: default input → 16 kHz mono i16 → VAD
+/// relay → stub sink that logs gate-open/close transitions. No audio
+/// leaves the machine. `sensitivity` is `0..=3` (Quality → VeryAggressive).
+///
+/// Returns 0 on success, `-101` if `sensitivity` is out of range, or a
+/// negative `AudioError::code()` on capture failure.
+#[no_mangle]
+pub extern "C" fn speaker_core_vad_diagnostic_start(sensitivity: u8) -> i32 {
+    let s = match Sensitivity::from_level(sensitivity) {
+        Some(s) => s,
+        None => return -101,
+    };
+    match audio::start_vad_diagnostic(s) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("speaker-core: vad diagnostic start failed: {e:?}");
+            e.code()
+        }
+    }
+}
+
+/// Idempotent — safe to call when no diagnostic is running.
+#[no_mangle]
+pub extern "C" fn speaker_core_vad_diagnostic_stop() {
+    audio::stop_vad_diagnostic();
 }
 
 /// Force the system default output to the Bluetooth speaker whose MAC

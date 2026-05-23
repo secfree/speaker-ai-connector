@@ -19,7 +19,11 @@
       "Bash(make test *)",
       "Bash(make build *)",
       "Bash(make app *)",
-      "Bash(cargo tree *)"
+      "Bash(cargo tree *)",
+      "Bash(cargo search *)",
+      "Bash(cargo info *)",
+      "Bash(cargo doc *)",
+      "Bash(find ~/.cargo/registry/src -name \"fvad-0.1.3\" -type d 2>/dev/null | head -1)"
     ]
   }
 }

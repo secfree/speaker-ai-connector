@@ -11,3 +11,4 @@ crate-type = ["staticlib", "rlib"]
 
 [dependencies]
 cpal = "0.15"
+fvad = "0.1"

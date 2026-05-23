@@ -15,6 +15,8 @@ use std::sync::{Mutex, OnceLock};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, Stream, StreamConfig};
 
+use crate::vad::{Sensitivity, VadRelay};
+
 #[derive(Debug)]
 pub enum AudioError {
     NoInputDevice,
@@ -25,6 +27,7 @@ pub enum AudioError {
     StreamBuildFailed(String),
     StreamStartFailed(String),
     AlreadyRunning,
+    VadInit(String),
 }
 
 impl AudioError {
@@ -42,6 +45,7 @@ impl AudioError {
             AudioError::StreamBuildFailed(_) => -7,
             AudioError::StreamStartFailed(_) => -8,
             AudioError::AlreadyRunning => -9,
+            AudioError::VadInit(_) => -10,
         }
     }
 }
@@ -195,5 +199,166 @@ pub fn start_loopback() -> Result<(), AudioError> {
 pub fn stop_loopback() {
     let mut guard = slot().lock().unwrap();
     // Dropping the streams releases CoreAudio's callback registration.
+    *guard = None;
+}
+
+// --- VAD diagnostic --------------------------------------------------
+//
+// M3 wiring: default input → mono → 16 kHz i16 → VadRelay → stub sink.
+// "Stub sink" here is `eprintln!` of gate-open/close transitions and
+// rolling frame counts — the real Gemini Live upload sink lands in M4.
+// The 16 kHz mono `i16` contract is the same one the upload encoder
+// will need, so this diagnostic is the natural place to debug it now
+// without an API key in the loop.
+
+/// 20 ms frames at 16 kHz — the WebRTC VAD's middle ground (10/30 ms
+/// are also legal). 20 ms keeps latency low without making the gate
+/// twitchy on short utterances.
+const VAD_FRAME_MS: u32 = 20;
+const VAD_SAMPLE_RATE: u32 = 16_000;
+/// ~300 ms of leading audio survives gate-open — captures the start
+/// of a word that triggered the VAD a few frames late.
+const VAD_PREROLL_FRAMES: usize = 15;
+/// ~700 ms hangover bridges inter-word pauses; long enough that a
+/// thinking child doesn't drop mid-utterance, short enough that the
+/// gate actually closes between turns.
+const VAD_HANGOVER_FRAMES: usize = 35;
+
+struct VadHandle {
+    _input: Stream,
+}
+
+unsafe impl Send for VadHandle {}
+
+fn vad_slot() -> &'static Mutex<Option<VadHandle>> {
+    static SLOT: OnceLock<Mutex<Option<VadHandle>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+pub fn start_vad_diagnostic(sensitivity: Sensitivity) -> Result<(), AudioError> {
+    let mut guard = vad_slot().lock().unwrap();
+    if guard.is_some() {
+        return Err(AudioError::AlreadyRunning);
+    }
+
+    let host = cpal::default_host();
+    let input_device = host.default_input_device().ok_or(AudioError::NoInputDevice)?;
+    let input_cfg = input_device
+        .default_input_config()
+        .map_err(|e| AudioError::DefaultInputConfig(e.to_string()))?;
+    if input_cfg.sample_format() != SampleFormat::F32 {
+        return Err(AudioError::UnsupportedSampleFormat(input_cfg.sample_format()));
+    }
+
+    let input_rate = input_cfg.sample_rate().0;
+    let input_channels = input_cfg.channels() as usize;
+    eprintln!(
+        "speaker-core: vad diagnostic input {}Hz/{}ch → relay {}Hz/1ch ({:?})",
+        input_rate, input_channels, VAD_SAMPLE_RATE, sensitivity
+    );
+
+    let in_stream_cfg = StreamConfig {
+        channels: input_cfg.channels(),
+        sample_rate: SampleRate(input_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+
+    let relay = VadRelay::new(
+        VAD_SAMPLE_RATE,
+        VAD_FRAME_MS,
+        sensitivity,
+        VAD_PREROLL_FRAMES,
+        VAD_HANGOVER_FRAMES,
+    )
+    .map_err(|e| AudioError::VadInit(format!("{e:?}")))?;
+
+    // Linear-interpolation resampler state (input_rate → 16 kHz mono).
+    // Trivial — same approach as the M2 loopback's output resampler.
+    // The real M4 resampler will replace this once the upload sink is real.
+    let step = input_rate as f64 / VAD_SAMPLE_RATE as f64;
+    let mut prev_sample: f32 = 0.0;
+    let mut next_sample: f32 = 0.0;
+    let mut frac: f64 = 1.0;
+    let mut mono_residue: VecDeque<f32> = VecDeque::with_capacity(input_rate as usize / 10);
+
+    // Stub-sink counters, reported on each transition for sanity.
+    let mut relay = relay;
+    let mut forwarded_frames: u64 = 0;
+    let mut session_frames: u64 = 0;
+
+    let input_stream = input_device
+        .build_input_stream(
+            &in_stream_cfg,
+            move |data: &[f32], _| {
+                // Step 1: downmix interleaved input to mono f32 at input_rate.
+                let frames = data.len() / input_channels;
+                let inv = 1.0 / input_channels as f32;
+                for frame in data.chunks_exact(input_channels) {
+                    let sum: f32 = frame.iter().sum();
+                    mono_residue.push_back(sum * inv);
+                }
+                let _ = frames;
+
+                // Step 2: resample mono f32 → 16 kHz i16, batched.
+                let mut batch: Vec<i16> = Vec::with_capacity(mono_residue.len() / step as usize + 1);
+                loop {
+                    // Need a sample available *and* the previous-pair state advanced.
+                    while frac >= 1.0 {
+                        match mono_residue.pop_front() {
+                            Some(s) => {
+                                prev_sample = next_sample;
+                                next_sample = s;
+                                frac -= 1.0;
+                            }
+                            None => break,
+                        }
+                    }
+                    if frac >= 1.0 {
+                        // Out of input samples for now — wait for next callback.
+                        break;
+                    }
+                    let f = frac as f32;
+                    let s = prev_sample * (1.0 - f) + next_sample * f;
+                    let clamped = s.clamp(-1.0, 1.0);
+                    batch.push((clamped * i16::MAX as f32) as i16);
+                    frac += step;
+                }
+
+                if batch.is_empty() {
+                    return;
+                }
+
+                // Step 3: hand to the VAD relay; log transitions to the stub sink.
+                let out = relay.process(&batch);
+                session_frames += (batch.len() / relay.frame_samples()) as u64;
+                forwarded_frames += out.frames.len() as u64;
+                if out.opened {
+                    eprintln!(
+                        "speaker-core: vad gate OPEN (seen {} frames so far)",
+                        session_frames
+                    );
+                }
+                if out.closed {
+                    eprintln!(
+                        "speaker-core: vad gate CLOSED (forwarded {} of {} frames)",
+                        forwarded_frames, session_frames
+                    );
+                }
+            },
+            |err| eprintln!("speaker-core: vad input stream error: {err}"),
+            None,
+        )
+        .map_err(|e| AudioError::StreamBuildFailed(format!("vad input: {e}")))?;
+
+    input_stream
+        .play()
+        .map_err(|e| AudioError::StreamStartFailed(format!("vad input: {e}")))?;
+
+    *guard = Some(VadHandle { _input: input_stream });
+    Ok(())
+}
+
+pub fn stop_vad_diagnostic() {
+    let mut guard = vad_slot().lock().unwrap();
     *guard = None;
 }

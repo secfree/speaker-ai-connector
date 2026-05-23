@@ -43,11 +43,11 @@ expanding the original.
 
 ## M3 — VAD relay using `libfvad`
 
-- [todo] Add `libfvad` (or a Rust binding) to `speaker-core`. Verify it builds via `cc` on macOS.
-- [todo] Implement `vad.rs`: 10/20/30 ms frame slicing, aggressiveness level, gate open/close with pre-roll and hangover.
-- [todo] Unit tests with recorded fixtures (silence → no frames; speech → frames; trailing silence closes the gate).
-- [todo] Hook the VAD between capture and the (still-stubbed) upload sink. Log "gate open / gate closed" transitions for manual verification.
-- [todo] Expose VAD sensitivity in `SettingsView` (4 levels).
+- [done] Add `libfvad` (or a Rust binding) to `speaker-core`. Verify it builds via `cc` on macOS. (`fvad` crate, which depends on `libfvad-sys` and compiles libfvad through `cc`.)
+- [done] Implement `vad.rs`: 10/20/30 ms frame slicing, aggressiveness level, gate open/close with pre-roll and hangover.
+- [done] Unit tests with synthetic fixtures (silence → no frames; speech → frames via the `Gate` state machine with mocked decisions; trailing silence closes the gate; plus a real-libfvad sanity test that silence never opens the gate). Recorded-speech fixtures were skipped — the gate state machine is unit-testable independently of libfvad, and live speech is exercised via the M3 VAD diagnostic.
+- [done] Hook the VAD between capture and the (still-stubbed) upload sink. Logs "gate OPEN" / "gate CLOSED" transitions and forwarded-frame counts to stderr for manual verification. Stub sink lives behind the `speaker_core_vad_diagnostic_{start,stop}` FFI.
+- [done] Expose VAD sensitivity in `SettingsView` (4 levels: Quality / LowBitrate / Aggressive / VeryAggressive). In-memory only for M3; persistence lands in M5.
 
 ## M4 — Gemini Live WebSocket client + API key in Keychain
 
