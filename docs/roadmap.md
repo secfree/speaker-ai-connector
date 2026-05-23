@@ -47,20 +47,34 @@ expanding the original.
 - [done] Implement `vad.rs`: 10/20/30 ms frame slicing, aggressiveness level, gate open/close with pre-roll and hangover.
 - [done] Unit tests with synthetic fixtures (silence → no frames; speech → frames via the `Gate` state machine with mocked decisions; trailing silence closes the gate; plus a real-libfvad sanity test that silence never opens the gate). Recorded-speech fixtures were skipped — the gate state machine is unit-testable independently of libfvad, and live speech is exercised via the M3 VAD diagnostic.
 - [done] Hook the VAD between capture and the (still-stubbed) upload sink. Logs "gate OPEN" / "gate CLOSED" transitions and forwarded-frame counts to stderr for manual verification. Stub sink lives behind the `speaker_core_vad_diagnostic_{start,stop}` FFI.
-- [done] Expose VAD sensitivity in `SettingsView` (4 levels: Quality / LowBitrate / Aggressive / VeryAggressive). In-memory only for M3; persistence lands in M5.
+- [done] Expose VAD sensitivity in `SettingsView` (4 levels: Quality / LowBitrate / Aggressive / VeryAggressive). In-memory only for M3; persistence lands in M6.
 
-## M4 — Gemini Live WebSocket client + API key in Keychain
+## M4 — Session recording + session history viewer
+
+- [todo] Define on-disk layout: `~/Library/Application Support/SpeakerAIConnector/sessions/<session-id>/` containing `manifest.json` + `<seq>-<in|out>.wav` clip files. `<session-id>` is the RFC 3339 UTC start timestamp; `<seq>` is a zero-padded ordinal within the session.
+- [todo] Add `hound` (WAV writer) and `serde_json` to `speaker-core`.
+- [todo] Implement `sessions.rs`: `SessionRecorder` with `start_session(trigger, target_addr) -> SessionHandle`, `begin_input_clip` / `write_input_frames` / `end_input_clip`, the same trio for output, and `end_session()` that finalizes the manifest.
+- [todo] Wire the recorder between the VAD gate and the (still-stubbed) upload sink: each gate OPEN → CLOSED becomes one input clip. The output side is stubbed for M4 and wired to real Gemini frames in M5.
+- [todo] Implement a query API on the core: `list_sessions() -> Vec<SessionMeta>` (newest first), `list_clips(session_id) -> Vec<ClipMeta>`, `clip_path(session_id, clip_id) -> PathBuf`.
+- [todo] Expose `list_sessions`, `list_clips`, and `clip_path` over FFI (file paths out, never PCM).
+- [todo] macOS shell: add a "Sessions…" item to the menu-bar that opens a new `SessionsView` window listing sessions newest-first (start time, duration, trigger, clip count).
+- [todo] In `SessionsView`, selecting a session shows clips in order with direction (in / out) icons, offset from session start, and duration. Clicking a clip plays it via `AVAudioPlayer`.
+- [todo] Add a "Reveal Sessions Folder" button in `SettingsView` that opens the sessions directory in Finder.
+- [todo] Verify end-to-end via the M3 VAD diagnostic: run `speaker_core_vad_diagnostic_start`, speak a few utterances, stop it, and confirm a session with the expected input clips appears in `SessionsView` and each plays back correctly.
+
+## M5 — Gemini Live WebSocket client + API key in Keychain
 
 - [todo] Add `tokio`, `tokio-tungstenite`, `reqwest` (if needed for auth), `keyring` to `speaker-core`.
 - [todo] Implement `gemini.rs`: connect, send config (model, safety, audio format), stream PCM up, receive audio frames down.
 - [todo] Define typed error enum: `NoApiKey`, `AuthFailed`, `Network`, `SafetyBlocked`, `Other(String)`.
 - [todo] Pick child-appropriate Gemini safety defaults; record the choice in the design doc.
 - [todo] Store/retrieve API key via `keyring` (macOS Keychain). Add a masked input field in `SettingsView`.
-- [todo] Manual end-to-end test: speak into the laptop mic, hear Gemini's reply over the default output. (Speaker hardware comes in M6.)
-- [todo] Expose a temporary "Start manual session" entry point (CLI flag, debug menu, or test harness) that runs the full capture → VAD → Gemini → playback path against the default input/output, so the AI pipeline is testable without Bluetooth. The polished menu-bar Start/Stop session item lands in M5.
+- [todo] Wire received Gemini audio frames into `SessionRecorder` as output clips (one clip per response burst); confirm clips appear in `SessionsView` alongside the matching input clips.
+- [todo] Manual end-to-end test: speak into the laptop mic, hear Gemini's reply over the default output. (Speaker hardware comes in M7.)
+- [todo] Expose a temporary "Start manual session" entry point (CLI flag, debug menu, or test harness) that runs the full capture → VAD → Gemini → playback path against the default input/output, so the AI pipeline is testable without Bluetooth. The polished menu-bar Start/Stop session item lands in M6.
 - [todo] Surface each typed error as a distinct menu-bar message (per CLAUDE.md "Surface session failures explicitly").
 
-## M5 — Real FFI surface + Coordinator wiring + persistence + login item
+## M6 — Real FFI surface + Coordinator wiring + persistence + login item
 
 - [todo] Decide FFI binding strategy: hand-written C ABI vs. `uniffi` vs. `swift-bridge`. Document the call.
 - [todo] Implement the chosen FFI: `BTEvent` in, `SessionCommand::{Start, Stop}` in, `StatusEvent` out, config getters/setters. No raw PCM crosses the boundary.
@@ -69,12 +83,13 @@ expanding the original.
 - [todo] Persist all non-secret settings (target device, model, VAD sensitivity, silence timeout, force-default-output toggle).
 - [todo] Wire `SMAppService.mainApp.register()` for "Start at login"; surface failure in `SettingsView`.
 - [todo] Implement the full session state machine: `Idle → Launching → SessionActive → TearingDown → Idle` driven by `BTEvent`s.
+- [todo] Wire `SessionRecorder` lifecycle into the state machine: `Launching → start_session(trigger, target_addr)`, `TearingDown → end_session()`. Replaces the M3-diagnostic-driven recording path from M4.
 - [todo] Render `StatusEvent`s in `MenuBarExtra` (text + icon variant per state, including a manual-session indicator).
 - [todo] Add a **Start session / Stop session** item to `MenuBarExtra` that calls into the core's `SessionCommand` FFI. Disabled (or relabeled) while a Bluetooth-driven session is active.
 - [todo] Debounce Bluetooth events (default 5 s) inside the core, not the shell.
 - [todo] Add a "Test now" button in `SettingsView` that simulates a connect event end-to-end.
 
-## M6 — On-hardware polish
+## M7 — On-hardware polish
 
 - [todo] Test with the actual target speaker(s) and a child's voice in a real room.
 - [todo] Decide the default for the force-default-output toggle (on/off) based on what macOS does in practice.
