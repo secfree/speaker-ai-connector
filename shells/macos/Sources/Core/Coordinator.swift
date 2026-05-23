@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AVFoundation
 import os
 
 private let log = Logger(subsystem: "com.secfree.SpeakerAIConnector", category: "core")
@@ -42,7 +43,13 @@ final class Coordinator: ObservableObject {
 
     let watcher = BluetoothWatcher()
 
+    /// How long the diagnostics loopback runs before auto-stopping.
+    /// Short enough that an accidental click can't pin the audio devices
+    /// open, long enough to actually hear a few words.
+    static let loopbackAutoStopSeconds: UInt64 = 3
+
     private var pumpTask: Task<Void, Never>?
+    private var loopbackAutoStopTask: Task<Void, Never>?
 
     init() {
         if let cstr = speaker_core_version() {
@@ -54,17 +61,61 @@ final class Coordinator: ObservableObject {
 
     func toggleLoopback() {
         if loopbackRunning {
-            speaker_core_audio_loopback_stop()
-            loopbackRunning = false
-            refreshIdleStatus()
+            stopLoopback()
         } else {
-            let rc = speaker_core_audio_loopback_start()
-            if rc == 0 {
-                loopbackRunning = true
-            } else {
-                status = .error("Audio loopback failed (code \(rc))")
+            startLoopback()
+        }
+    }
+
+    private func startLoopback() {
+        // Explicit permission check so a denied state surfaces as a
+        // human-readable message instead of a cpal stream-build error
+        // code. On .notDetermined this is also what triggers the
+        // NSMicrophoneUsageDescription system prompt on first capture.
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            beginLoopbackStream()
+        case .notDetermined:
+            Task { @MainActor in
+                let granted = await AVCaptureDevice.requestAccess(for: .audio)
+                if granted {
+                    self.beginLoopbackStream()
+                } else {
+                    self.status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
+                }
+            }
+        case .denied, .restricted:
+            status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
+        @unknown default:
+            status = .error("Microphone access unavailable")
+        }
+    }
+
+    private func beginLoopbackStream() {
+        let rc = speaker_core_audio_loopback_start()
+        guard rc == 0 else {
+            status = .error("Audio loopback failed (code \(rc))")
+            return
+        }
+        loopbackRunning = true
+        loopbackAutoStopTask?.cancel()
+        let seconds = Self.loopbackAutoStopSeconds
+        loopbackAutoStopTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, self.loopbackRunning else { return }
+                self.stopLoopback()
             }
         }
+    }
+
+    private func stopLoopback() {
+        loopbackAutoStopTask?.cancel()
+        loopbackAutoStopTask = nil
+        speaker_core_audio_loopback_stop()
+        loopbackRunning = false
+        refreshIdleStatus()
     }
 
     func start() {

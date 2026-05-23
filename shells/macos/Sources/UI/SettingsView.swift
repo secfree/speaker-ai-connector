@@ -29,7 +29,7 @@ struct SettingsView: View {
                 Button(coordinator.loopbackRunning ? "Stop audio loopback" : "Start audio loopback") {
                     coordinator.toggleLoopback()
                 }
-                Text("Plays your default input back through the default output.")
+                Text("Plays your default input back through the default output. Auto-stops after 3 seconds.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
