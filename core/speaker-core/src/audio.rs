@@ -10,12 +10,17 @@
 //! work for the smoke test. A real resampler lives in M4.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, Stream, StreamConfig};
 
-use crate::sessions::{ClipDirection, SessionRecorder};
+use crate::gemini::{
+    EventSink, GeminiError, GeminiEvent, GeminiSession, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE,
+};
+use crate::last_error;
+use crate::sessions::{ClipDirection, SessionRecorder, SessionTrigger};
 use crate::vad::{Sensitivity, VadRelay};
 
 #[derive(Debug)]
@@ -29,6 +34,7 @@ pub enum AudioError {
     StreamStartFailed(String),
     AlreadyRunning,
     VadInit(String),
+    Gemini(GeminiError),
 }
 
 impl AudioError {
@@ -47,6 +53,9 @@ impl AudioError {
             AudioError::StreamStartFailed(_) => -8,
             AudioError::AlreadyRunning => -9,
             AudioError::VadInit(_) => -10,
+            // Pass-through — the underlying Gemini code carries its own
+            // typed identity (NoApiKey / AuthFailed / Network / …).
+            AudioError::Gemini(e) => e.code(),
         }
     }
 }
@@ -381,3 +390,310 @@ pub fn stop_vad_diagnostic() {
     let mut guard = vad_slot().lock().unwrap();
     *guard = None;
 }
+
+// --- Manual session (M5) --------------------------------------------
+//
+// Full capture → VAD → Gemini Live → playback loop, exercised end-to-end
+// against the default input/output. This is the developer/debug path the
+// design calls out: it proves the AI pipeline works without depending on
+// a Bluetooth speaker connecting. The polished menu-bar Start/Stop UX
+// (disabled-while-BT, status surfaces) is M6.
+//
+// Lifecycle:
+//   start_manual_session()
+//     ├─ SessionRecorder.start_session(Manual, …, 16 kHz)
+//     ├─ GeminiSession.start(api_key)        ← blocks ≤15 s on connect
+//     ├─ output stream: queue → device-rate stereo f32
+//     └─ input stream:  device → 16 kHz mono i16 → VAD → upload + clip
+//   stop_manual_session()
+//     ├─ drop streams (CoreAudio callbacks released)
+//     ├─ drop GeminiSession (clean WS close, thread join)
+//     └─ recorder.end_session()  (best-effort flush of an open clip)
+
+struct ManualHandle {
+    _input: Stream,
+    _output: Stream,
+    _gemini: GeminiSession,
+}
+
+unsafe impl Send for ManualHandle {}
+
+fn manual_slot() -> &'static Mutex<Option<ManualHandle>> {
+    static SLOT: OnceLock<Mutex<Option<ManualHandle>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// Bounded so a runaway response can't pin unbounded memory. ~5 s of
+/// 24 kHz mono i16 = 240 kB — well under any reasonable response burst.
+const PLAYBACK_QUEUE_CAP_SAMPLES: usize = 24_000 * 5;
+
+pub fn start_manual_session(
+    api_key: String,
+    model: String,
+    sensitivity: Sensitivity,
+) -> Result<(), AudioError> {
+    let mut guard = manual_slot().lock().unwrap();
+    if guard.is_some() {
+        return Err(AudioError::AlreadyRunning);
+    }
+    last_error::clear();
+
+    let host = cpal::default_host();
+    let input_device = host.default_input_device().ok_or(AudioError::NoInputDevice)?;
+    let output_device = host.default_output_device().ok_or(AudioError::NoOutputDevice)?;
+    let input_cfg = input_device
+        .default_input_config()
+        .map_err(|e| AudioError::DefaultInputConfig(e.to_string()))?;
+    let output_cfg = output_device
+        .default_output_config()
+        .map_err(|e| AudioError::DefaultOutputConfig(e.to_string()))?;
+    if input_cfg.sample_format() != SampleFormat::F32
+        || output_cfg.sample_format() != SampleFormat::F32
+    {
+        return Err(AudioError::UnsupportedSampleFormat(input_cfg.sample_format()));
+    }
+
+    let input_rate = input_cfg.sample_rate().0;
+    let input_channels = input_cfg.channels() as usize;
+    let output_rate = output_cfg.sample_rate().0;
+    let output_channels = output_cfg.channels() as usize;
+    eprintln!(
+        "speaker-core: manual session input {}Hz/{}ch → relay {}Hz/1ch ({:?}); output queue {}Hz/1ch → {}Hz/{}ch",
+        input_rate, input_channels, INPUT_SAMPLE_RATE, sensitivity, OUTPUT_SAMPLE_RATE, output_rate, output_channels
+    );
+
+    // Open the on-disk session before connecting Gemini — if the recorder
+    // can't open, we want the failure before any network spend.
+    let recorder = SessionRecorder::instance();
+    recorder
+        .start_session(SessionTrigger::Manual, None, INPUT_SAMPLE_RATE)
+        .map_err(|e| {
+            eprintln!("speaker-core: manual session start_session failed: {e:?}");
+            AudioError::StreamStartFailed(format!("recorder: {e:?}"))
+        })?;
+
+    // Shared playback queue: gemini.rs writes 24 kHz mono i16; the output
+    // callback drains and resamples to output device rate/channels.
+    let playback_queue: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::with_capacity(
+        PLAYBACK_QUEUE_CAP_SAMPLES,
+    )));
+    // Tracks whether an Out clip is currently open in the recorder, so a
+    // mid-burst stream of AudioChunks knows to skip begin_clip.
+    let out_clip_open = Arc::new(AtomicBool::new(false));
+
+    let queue_for_sink = playback_queue.clone();
+    let out_clip_for_sink = out_clip_open.clone();
+    let sink: Arc<dyn EventSink> = Arc::new(move |event: GeminiEvent| {
+        match event {
+            GeminiEvent::SetupComplete => {
+                eprintln!("speaker-core: gemini setup complete");
+            }
+            GeminiEvent::AudioChunk(samples) => {
+                let rec = SessionRecorder::instance();
+                if !out_clip_for_sink.load(Ordering::SeqCst) {
+                    if let Err(e) = rec.begin_clip(ClipDirection::Out) {
+                        eprintln!("speaker-core: gemini begin_clip(Out) failed: {e:?}");
+                    } else {
+                        out_clip_for_sink.store(true, Ordering::SeqCst);
+                    }
+                }
+                if out_clip_for_sink.load(Ordering::SeqCst) {
+                    if let Err(e) = rec.write_frames(ClipDirection::Out, &samples) {
+                        eprintln!("speaker-core: gemini write_frames(Out) failed: {e:?}");
+                    }
+                }
+                let mut q = queue_for_sink.lock().unwrap();
+                let overflow = (q.len() + samples.len()).saturating_sub(PLAYBACK_QUEUE_CAP_SAMPLES);
+                if overflow > 0 {
+                    q.drain(..overflow);
+                }
+                q.extend(samples);
+            }
+            GeminiEvent::TurnComplete | GeminiEvent::Interrupted => {
+                if out_clip_for_sink
+                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    let rec = SessionRecorder::instance();
+                    if let Err(e) = rec.end_clip(ClipDirection::Out) {
+                        eprintln!("speaker-core: gemini end_clip(Out) failed: {e:?}");
+                    }
+                }
+                if matches!(event, GeminiEvent::Interrupted) {
+                    // Drop unplayed audio so we don't talk over the user.
+                    queue_for_sink.lock().unwrap().clear();
+                }
+            }
+            GeminiEvent::Error(e) => {
+                eprintln!("speaker-core: gemini error: {e:?}");
+                last_error::set(&e);
+            }
+            GeminiEvent::Closed => {
+                eprintln!("speaker-core: gemini connection closed");
+            }
+        }
+    });
+
+    let gemini = GeminiSession::start(api_key, model, sink).map_err(|e| {
+        // Roll back the session on the disk so the next attempt isn't
+        // blocked with AlreadyActive — same pattern as the VAD diagnostic.
+        let _ = recorder.end_session();
+        AudioError::Gemini(e)
+    })?;
+
+    // --- Output stream: drain queue → device-rate stereo f32 ---------
+    let queue_for_out = playback_queue.clone();
+    let out_stream_cfg = StreamConfig {
+        channels: output_cfg.channels(),
+        sample_rate: SampleRate(output_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let out_step = OUTPUT_SAMPLE_RATE as f64 / output_rate as f64;
+    let mut out_prev: f32 = 0.0;
+    let mut out_next: f32 = 0.0;
+    let mut out_frac: f64 = 1.0;
+    let output_stream = output_device
+        .build_output_stream(
+            &out_stream_cfg,
+            move |data: &mut [f32], _| {
+                let mut q = queue_for_out.lock().unwrap();
+                for frame in data.chunks_exact_mut(output_channels) {
+                    while out_frac >= 1.0 {
+                        out_prev = out_next;
+                        let s = q
+                            .pop_front()
+                            .map(|v| v as f32 / i16::MAX as f32)
+                            .unwrap_or(out_prev);
+                        out_next = s;
+                        out_frac -= 1.0;
+                    }
+                    let f = out_frac as f32;
+                    let s = out_prev * (1.0 - f) + out_next * f;
+                    for ch in frame.iter_mut() {
+                        *ch = s;
+                    }
+                    out_frac += out_step;
+                }
+            },
+            |err| eprintln!("speaker-core: manual output stream error: {err}"),
+            None,
+        )
+        .map_err(|e| AudioError::StreamBuildFailed(format!("manual output: {e}")))?;
+
+    // --- Input stream: device → 16 kHz mono i16 → VAD → upload + clip
+    let in_stream_cfg = StreamConfig {
+        channels: input_cfg.channels(),
+        sample_rate: SampleRate(input_rate),
+        buffer_size: cpal::BufferSize::Default,
+    };
+    let relay = VadRelay::new(
+        INPUT_SAMPLE_RATE,
+        VAD_FRAME_MS,
+        sensitivity,
+        VAD_PREROLL_FRAMES,
+        VAD_HANGOVER_FRAMES,
+    )
+    .map_err(|e| AudioError::VadInit(format!("{e:?}")))?;
+    let mut relay = relay;
+
+    let in_step = input_rate as f64 / INPUT_SAMPLE_RATE as f64;
+    let mut in_prev: f32 = 0.0;
+    let mut in_next: f32 = 0.0;
+    let mut in_frac: f64 = 1.0;
+    let mut mono_residue: VecDeque<f32> = VecDeque::with_capacity(input_rate as usize / 10);
+
+    // GeminiSession is `Send`; move a handle into the input callback so
+    // we can forward gated frames to the upload task.
+    let upload_handle = gemini.upload_handle();
+    let input_stream = input_device
+        .build_input_stream(
+            &in_stream_cfg,
+            move |data: &[f32], _| {
+                let inv = 1.0 / input_channels as f32;
+                for frame in data.chunks_exact(input_channels) {
+                    let sum: f32 = frame.iter().sum();
+                    mono_residue.push_back(sum * inv);
+                }
+                let mut batch: Vec<i16> = Vec::with_capacity(mono_residue.len() / in_step as usize + 1);
+                loop {
+                    while in_frac >= 1.0 {
+                        match mono_residue.pop_front() {
+                            Some(s) => {
+                                in_prev = in_next;
+                                in_next = s;
+                                in_frac -= 1.0;
+                            }
+                            None => break,
+                        }
+                    }
+                    if in_frac >= 1.0 {
+                        break;
+                    }
+                    let f = in_frac as f32;
+                    let s = in_prev * (1.0 - f) + in_next * f;
+                    let clamped = s.clamp(-1.0, 1.0);
+                    batch.push((clamped * i16::MAX as f32) as i16);
+                    in_frac += in_step;
+                }
+                if batch.is_empty() {
+                    return;
+                }
+                let out = relay.process(&batch);
+                let recorder = SessionRecorder::instance();
+                if out.opened {
+                    if let Err(e) = recorder.begin_clip(ClipDirection::In) {
+                        eprintln!("speaker-core: manual begin_clip(In) failed: {e:?}");
+                    }
+                }
+                for frame in &out.frames {
+                    if let Err(e) = recorder.write_frames(ClipDirection::In, frame) {
+                        eprintln!("speaker-core: manual write_frames(In) failed: {e:?}");
+                        break;
+                    }
+                    if let Err(e) = upload_handle.send(frame) {
+                        // Channel closed — Gemini session is gone. Don't
+                        // tear the audio path down from inside the cpal
+                        // callback; the next stop_manual_session() cleans up.
+                        eprintln!("speaker-core: gemini upload send failed: {e:?}");
+                        break;
+                    }
+                }
+                if out.closed {
+                    if let Err(e) = recorder.end_clip(ClipDirection::In) {
+                        eprintln!("speaker-core: manual end_clip(In) failed: {e:?}");
+                    }
+                }
+            },
+            |err| eprintln!("speaker-core: manual input stream error: {err}"),
+            None,
+        )
+        .map_err(|e| AudioError::StreamBuildFailed(format!("manual input: {e}")))?;
+
+    input_stream
+        .play()
+        .map_err(|e| AudioError::StreamStartFailed(format!("manual input: {e}")))?;
+    output_stream
+        .play()
+        .map_err(|e| AudioError::StreamStartFailed(format!("manual output: {e}")))?;
+
+    *guard = Some(ManualHandle {
+        _input: input_stream,
+        _output: output_stream,
+        _gemini: gemini,
+    });
+    Ok(())
+}
+
+pub fn stop_manual_session() {
+    let mut guard = manual_slot().lock().unwrap();
+    // Drop order matters: streams first (release CoreAudio callbacks that
+    // hold the upload handle), then GeminiSession (joins its thread).
+    *guard = None;
+    let recorder = SessionRecorder::instance();
+    if recorder.is_active() {
+        if let Err(e) = recorder.end_session() {
+            eprintln!("speaker-core: manual end_session failed: {e:?}");
+        }
+    }
+}
+

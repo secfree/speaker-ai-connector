@@ -28,6 +28,7 @@ struct SpeakerAIConnectorApp: App {
     private func menuIcon(for status: StatusEvent) -> String {
         switch status {
         case .sessionActive: return "dot.radiowaves.left.and.right"
+        case .manualSessionActive: return "mic.fill"
         case .sessionLaunching: return "arrow.triangle.2.circlepath"
         case .error: return "exclamationmark.triangle"
         case .noDeviceSelected: return "questionmark.circle"
@@ -44,6 +45,12 @@ struct MenuContent: View {
     var body: some View {
         Text(coordinator.status.menuBarText)
         Divider()
+        // M5: manual session is a developer/debug affordance — the
+        // polished disabled-while-BT-active behavior lands in M6.
+        Button(coordinator.manualSessionRunning ? "Stop session" : "Start session") {
+            coordinator.toggleManualSession()
+        }
+        .disabled(!coordinator.apiKeyStored && !coordinator.manualSessionRunning)
         Button("Sessions…") {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: "sessions")

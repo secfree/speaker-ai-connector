@@ -14,6 +14,7 @@ pub mod ffi;
 pub mod audio;
 pub mod config;
 pub mod gemini;
+pub mod last_error;
 #[cfg(target_os = "macos")]
 pub mod routing;
 pub mod sessions;

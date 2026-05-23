@@ -12,6 +12,9 @@
 use std::ffi::{c_char, CStr, CString};
 
 use crate::audio;
+use crate::config;
+use crate::gemini::DEFAULT_MODEL;
+use crate::last_error;
 #[cfg(target_os = "macos")]
 use crate::routing;
 use crate::sessions::{SessionRecorder, SessionTrigger};
@@ -223,4 +226,170 @@ pub extern "C" fn speaker_core_sessions_clip_path(
             std::ptr::null_mut()
         }
     }
+}
+
+// --- API key (M5) ---------------------------------------------------
+//
+// The key lives in the macOS Keychain via `keyring`. The shell never
+// holds it for longer than a save round-trip — `get` returns it only
+// so the masked input field can rehydrate after the settings window
+// is reopened.
+
+/// Persist the API key. Empty strings are rejected — call
+/// `speaker_core_api_key_clear` to remove. Returns 0 on success or a
+/// negative `ConfigError::code()`.
+#[no_mangle]
+pub extern "C" fn speaker_core_api_key_set(key: *const c_char) -> i32 {
+    if key.is_null() {
+        return -100;
+    }
+    let s = match unsafe { CStr::from_ptr(key) }.to_str() {
+        Ok(s) => s,
+        Err(_) => return -100,
+    };
+    match config::set_api_key(s) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("speaker-core: api key set failed: {e:?}");
+            e.code()
+        }
+    }
+}
+
+/// Returns the stored API key as a UTF-8 NUL-terminated string, or
+/// null if not set or on error. Caller frees with `speaker_core_string_free`.
+#[no_mangle]
+pub extern "C" fn speaker_core_api_key_get() -> *mut c_char {
+    match config::get_api_key() {
+        Ok(Some(k)) => into_c_string(k),
+        Ok(None) => std::ptr::null_mut(),
+        Err(e) => {
+            eprintln!("speaker-core: api key get failed: {e:?}");
+            std::ptr::null_mut()
+        }
+    }
+}
+
+/// Returns 1 if a key is currently stored, 0 if not, negative on error.
+/// Useful for the shell's "API key set" indicator without surfacing the
+/// secret to Swift's heap.
+#[no_mangle]
+pub extern "C" fn speaker_core_api_key_has() -> i32 {
+    match config::get_api_key() {
+        Ok(Some(_)) => 1,
+        Ok(None) => 0,
+        Err(e) => {
+            eprintln!("speaker-core: api key has failed: {e:?}");
+            e.code()
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn speaker_core_api_key_clear() -> i32 {
+    match config::clear_api_key() {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("speaker-core: api key clear failed: {e:?}");
+            e.code()
+        }
+    }
+}
+
+// --- Manual session (M5) --------------------------------------------
+
+/// Start the manual end-to-end session: default input → VAD → Gemini
+/// Live → default output. Records both input clips (VAD-gated) and
+/// output clips (per response burst) under the sessions directory.
+///
+/// Reads the API key from the OS credential store. `sensitivity` is
+/// `0..=3` (Quality → VeryAggressive). Pass `model` = null for the
+/// default model.
+///
+/// Returns 0 on success. Negative codes:
+///   `-101` invalid sensitivity
+///   `-300` `GeminiError::NoApiKey` (no key in Keychain)
+///   `-301` `GeminiError::AuthFailed`
+///   `-302` `GeminiError::Network`
+///   other `AudioError::code()` for capture/playback failures.
+///
+/// Blocks ≤15 s on the initial WebSocket handshake; an auth failure
+/// surfaces synchronously rather than as a silent dead connection.
+#[no_mangle]
+pub extern "C" fn speaker_core_manual_session_start(
+    sensitivity: u8,
+    model: *const c_char,
+) -> i32 {
+    let s = match Sensitivity::from_level(sensitivity) {
+        Some(s) => s,
+        None => return -101,
+    };
+    let model_str = if model.is_null() {
+        DEFAULT_MODEL.to_string()
+    } else {
+        match unsafe { CStr::from_ptr(model) }.to_str() {
+            Ok(s) if !s.is_empty() => s.to_string(),
+            _ => DEFAULT_MODEL.to_string(),
+        }
+    };
+    let api_key = match config::get_api_key() {
+        Ok(Some(k)) => k,
+        Ok(None) => {
+            let e = crate::gemini::GeminiError::NoApiKey;
+            last_error::set(&e);
+            return e.code();
+        }
+        Err(e) => {
+            eprintln!("speaker-core: manual session: api key read failed: {e:?}");
+            return e.code();
+        }
+    };
+    match audio::start_manual_session(api_key, model_str, s) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("speaker-core: manual session start failed: {e:?}");
+            e.code()
+        }
+    }
+}
+
+/// Idempotent — safe to call when no manual session is running.
+#[no_mangle]
+pub extern "C" fn speaker_core_manual_session_stop() {
+    audio::stop_manual_session();
+}
+
+// --- Last session error ---------------------------------------------
+//
+// Errors that surface asynchronously inside the Gemini WS task can't
+// be returned from the start FFI. They land in `last_error::set`; the
+// shell polls these getters when the menu-bar item turns red.
+
+/// Returns the negative code of the last session error, or 0 if none.
+/// Non-destructive — call `_clear` to acknowledge.
+#[no_mangle]
+pub extern "C" fn speaker_core_last_session_error_code() -> i32 {
+    last_error::peek().map(|e| e.code).unwrap_or(0)
+}
+
+/// Returns the human-readable message for the last session error, or
+/// null if none. Caller frees with `speaker_core_string_free`.
+#[no_mangle]
+pub extern "C" fn speaker_core_last_session_error_message() -> *mut c_char {
+    last_error::peek().map(|e| into_c_string(e.message)).unwrap_or(std::ptr::null_mut())
+}
+
+/// Returns the stable error tag (`"no_api_key"`, `"auth_failed"`,
+/// `"network"`, `"safety_blocked"`, `"other"`) for the last session
+/// error, or null if none. The shell uses this to pick a localized
+/// message; the message getter is the fallback. Caller frees with
+/// `speaker_core_string_free`.
+#[no_mangle]
+pub extern "C" fn speaker_core_last_session_error_tag() -> *mut c_char {
+    last_error::peek().map(|e| into_c_string(e.tag.to_string())).unwrap_or(std::ptr::null_mut())
+}
+
+#[no_mangle]
+pub extern "C" fn speaker_core_last_session_error_clear() {
+    last_error::clear();
 }

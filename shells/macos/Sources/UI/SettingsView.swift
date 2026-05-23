@@ -4,9 +4,38 @@ import AppKit
 struct SettingsView: View {
     @EnvironmentObject var coordinator: Coordinator
     @State private var devices: [PairedDevice] = []
+    @State private var apiKeyDraft: String = ""
 
     var body: some View {
         Form {
+            Section("Gemini API key") {
+                // SecureField stays empty by design — the key lives in
+                // Keychain and we don't rehydrate the actual value into
+                // a Swift String (no need to widen the secret's blast
+                // radius). The status line below shows whether one is set.
+                SecureField("Paste API key", text: $apiKeyDraft)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Save") {
+                        if coordinator.saveApiKey(apiKeyDraft) {
+                            apiKeyDraft = ""
+                        }
+                    }
+                    .disabled(apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Button("Clear stored key") {
+                        coordinator.clearApiKey()
+                    }
+                    .disabled(!coordinator.apiKeyStored)
+                    Spacer()
+                    Text(coordinator.apiKeyStored ? "Stored in Keychain" : "No key set")
+                        .font(.caption)
+                        .foregroundStyle(coordinator.apiKeyStored ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
+                }
+                Text("Get a key from Google AI Studio. The app stores it in the macOS Keychain under com.secfree.SpeakerAIConnector — clear it anytime.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Speaker") {
                 Picker("Target device", selection: targetBinding) {
                     Text("None").tag(String?.none)

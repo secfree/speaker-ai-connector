@@ -16,6 +16,7 @@ enum StatusEvent: Equatable {
     case waitingForDevice(name: String)
     case sessionLaunching(name: String)
     case sessionActive(name: String)
+    case manualSessionActive
     case error(String)
 
     var menuBarText: String {
@@ -25,6 +26,7 @@ enum StatusEvent: Equatable {
         case .waitingForDevice(let name): return "Waiting for \(name)"
         case .sessionLaunching(let name): return "Launching session: \(name)"
         case .sessionActive(let name): return "Connected: \(name)"
+        case .manualSessionActive: return "Manual session active"
         case .error(let msg): return "Error: \(msg)"
         }
     }
@@ -56,6 +58,8 @@ final class Coordinator: ObservableObject {
     @Published private(set) var status: StatusEvent = .idle
     @Published private(set) var loopbackRunning: Bool = false
     @Published private(set) var vadDiagnosticRunning: Bool = false
+    @Published private(set) var manualSessionRunning: Bool = false
+    @Published private(set) var apiKeyStored: Bool = false
     @Published var targetAddress: String? {
         didSet {
             watcher.targetAddress = targetAddress
@@ -64,9 +68,9 @@ final class Coordinator: ObservableObject {
     }
     /// When on, the core's CoreAudio helper overrides the system default
     /// output to the target speaker before a session starts. In-memory
-    /// only for M2; persistence to TOML lands in M5.
+    /// only for M2; persistence to TOML lands in M6.
     @Published var forceDefaultOutput: Bool = false
-    /// In-memory only for M3; persistence to TOML lands in M5. Changes
+    /// In-memory only for M3; persistence to TOML lands in M6. Changes
     /// during a running diagnostic only take effect on the next start —
     /// libfvad's mode applies at relay construction time.
     @Published var vadSensitivity: VadSensitivity = .quality
@@ -85,8 +89,118 @@ final class Coordinator: ObservableObject {
         if let cstr = speaker_core_version() {
             log.info("core version: \(String(cString: cstr), privacy: .public)")
         }
+        apiKeyStored = (speaker_core_api_key_has() == 1)
         refreshIdleStatus()
         start()
+    }
+
+    // --- API key (M5) -----------------------------------------------
+
+    /// Round-trips through the Rust core to the macOS Keychain. Empty
+    /// strings are rejected by the core; surface as a user-visible
+    /// error so the masked input field can react.
+    @discardableResult
+    func saveApiKey(_ key: String) -> Bool {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            status = .error("API key is empty")
+            return false
+        }
+        let rc = trimmed.withCString { speaker_core_api_key_set($0) }
+        if rc == 0 {
+            apiKeyStored = true
+            // Clear any prior "no api key" error so the menu bar refreshes.
+            if case .error = status { refreshIdleStatus() }
+            return true
+        }
+        status = .error("Saving API key failed (code \(rc))")
+        return false
+    }
+
+    @discardableResult
+    func clearApiKey() -> Bool {
+        let rc = speaker_core_api_key_clear()
+        if rc == 0 {
+            apiKeyStored = false
+            return true
+        }
+        status = .error("Clearing API key failed (code \(rc))")
+        return false
+    }
+
+    // --- Manual session (M5) ----------------------------------------
+
+    func toggleManualSession() {
+        if manualSessionRunning {
+            stopManualSession()
+        } else {
+            startManualSession()
+        }
+    }
+
+    private func startManualSession() {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            beginManualSession()
+        case .notDetermined:
+            Task { @MainActor in
+                let granted = await AVCaptureDevice.requestAccess(for: .audio)
+                if granted {
+                    self.beginManualSession()
+                } else {
+                    self.status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
+                }
+            }
+        case .denied, .restricted:
+            status = .error("Microphone access denied — enable it in System Settings → Privacy & Security → Microphone")
+        @unknown default:
+            status = .error("Microphone access unavailable")
+        }
+    }
+
+    private func beginManualSession() {
+        speaker_core_last_session_error_clear()
+        let rc = speaker_core_manual_session_start(vadSensitivity.rawValue, nil)
+        guard rc == 0 else {
+            // Distinct typed messages per CLAUDE.md "Surface session
+            // failures explicitly". The Rust side already wrote a
+            // human-readable message; prefer it when available.
+            status = .error(menuMessage(for: rc))
+            return
+        }
+        manualSessionRunning = true
+        status = .manualSessionActive
+    }
+
+    private func stopManualSession() {
+        speaker_core_manual_session_stop()
+        manualSessionRunning = false
+        // The Gemini WS task may have died asynchronously and left a
+        // tagged error behind; surface it now rather than silently
+        // dropping back to idle.
+        let code = speaker_core_last_session_error_code()
+        if code != 0 {
+            status = .error(menuMessage(for: code))
+            speaker_core_last_session_error_clear()
+        } else {
+            refreshIdleStatus()
+        }
+    }
+
+    private func menuMessage(for code: Int32) -> String {
+        // Prefer the core's message (already human-readable).
+        if let raw = speaker_core_last_session_error_message() {
+            defer { speaker_core_string_free(raw) }
+            return String(cString: raw)
+        }
+        switch code {
+        case -300: return "No API key — open Settings"
+        case -301: return "Gemini auth failed — check API key"
+        case -302: return "Network error — will retry on next connect"
+        case -303: return "Gemini blocked the response (safety)"
+        case -101: return "Invalid VAD sensitivity"
+        default: return "Session failed (code \(code))"
+        }
     }
 
     func toggleLoopback() {

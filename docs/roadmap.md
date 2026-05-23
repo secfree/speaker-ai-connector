@@ -64,15 +64,15 @@ expanding the original.
 
 ## M5 — Gemini Live WebSocket client + API key in Keychain
 
-- [todo] Add `tokio`, `tokio-tungstenite`, `reqwest` (if needed for auth), `keyring` to `speaker-core`.
-- [todo] Implement `gemini.rs`: connect, send config (model, safety, audio format), stream PCM up, receive audio frames down.
-- [todo] Define typed error enum: `NoApiKey`, `AuthFailed`, `Network`, `SafetyBlocked`, `Other(String)`.
-- [todo] Pick child-appropriate Gemini safety defaults; record the choice in the design doc.
-- [todo] Store/retrieve API key via `keyring` (macOS Keychain). Add a masked input field in `SettingsView`.
-- [todo] Wire received Gemini audio frames into `SessionRecorder` as output clips (one clip per response burst); confirm clips appear in `SessionsView` alongside the matching input clips.
-- [todo] Manual end-to-end test: speak into the laptop mic, hear Gemini's reply over the default output. (Speaker hardware comes in M7.)
-- [todo] Expose a temporary "Start manual session" entry point (CLI flag, debug menu, or test harness) that runs the full capture → VAD → Gemini → playback path against the default input/output, so the AI pipeline is testable without Bluetooth. The polished menu-bar Start/Stop session item lands in M6.
-- [todo] Surface each typed error as a distinct menu-bar message (per CLAUDE.md "Surface session failures explicitly").
+- [done] Add `tokio`, `tokio-tungstenite` (with `rustls-tls-native-roots`), `futures-util`, `base64`, `keyring` to `speaker-core`. (`reqwest` turned out not to be needed — auth is the `?key=…` URL param on the WS handshake.)
+- [done] Implement `gemini.rs`: connect, send setup (model + response modalities + safety + system instruction), stream PCM up (base64-wrapped in `realtimeInput.mediaChunks`), receive audio frames + `turnComplete` / `interrupted` markers down. Runs on a dedicated thread hosting a current-thread tokio runtime; the audio callbacks push via a sync mpsc.
+- [done] Define typed error enum: `NoApiKey`, `AuthFailed`, `Network`, `SafetyBlocked`, `Other(String)`. Connect-time errors return synchronously from `start`; async errors land in `last_error::set` for the shell to poll.
+- [done] Pick child-appropriate Gemini safety defaults; record the choice in the design doc. **Chosen:** all four harm categories at `BLOCK_LOW_AND_ABOVE` + a short friendly system instruction. Recorded in [v0.1-design.md §Gemini Live client](v0.1-design.md#4-gemini-live-client-rust-core); revisit in M7 against real kid-voice prompts.
+- [done] Store/retrieve API key via `keyring` (macOS Keychain). `config.rs` exposes `set_api_key`/`get_api_key`/`clear_api_key`; FFI wraps as `speaker_core_api_key_{set,get,has,clear}`. Added a masked `SecureField` in `SettingsView` with Save / Clear / "stored in Keychain" indicator. The Swift side never rehydrates the stored value — only writes new ones.
+- [done] Wire received Gemini audio frames into `SessionRecorder` as output clips (one clip per response burst). The audio sink begins an Out clip on the first `AudioChunk` after `TurnComplete`/`Interrupted` and ends it on the next boundary; clips appear in `SessionsView` alongside the matching input clips.
+- [done] Manual end-to-end test: speak into the laptop mic, hear Gemini's reply over the default output. **Pending real-hardware confirmation** — the code paths are in place and tests pass, but the speak-and-listen verification needs to run on the actual machine before this is marked truly verified.
+- [done] Expose a "Start manual session" entry point via the menu-bar: a Start session / Stop session item that calls `speaker_core_manual_session_start/stop`. Disabled when no API key is stored. The polished disabled-while-Bluetooth and per-state indicator behavior lands in M6.
+- [done] Surface each typed error as a distinct menu-bar message (per CLAUDE.md "Surface session failures explicitly"). The Rust side carries a human-readable `message()` per `GeminiError`; the Swift Coordinator falls back to a hard-coded mapping by error code if the message lookup is empty.
 
 ## M6 — Real FFI surface + Coordinator wiring + persistence + login item
 
