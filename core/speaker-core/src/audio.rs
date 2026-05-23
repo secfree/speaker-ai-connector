@@ -483,6 +483,11 @@ pub fn start_manual_session(
 
     let queue_for_sink = playback_queue.clone();
     let out_clip_for_sink = out_clip_open.clone();
+    // Flipped on Error/Closed. The input callback checks this to stop
+    // hammering the dead upload channel, and we use it to gate the
+    // one-shot teardown thread so we only spawn it once per session.
+    let session_dead = Arc::new(AtomicBool::new(false));
+    let dead_for_sink = session_dead.clone();
     let sink: Arc<dyn EventSink> = Arc::new(move |event: GeminiEvent| {
         match event {
             GeminiEvent::SetupComplete => {
@@ -527,9 +532,11 @@ pub fn start_manual_session(
             GeminiEvent::Error(e) => {
                 eprintln!("speaker-core: gemini error: {e:?}");
                 last_error::set(&e);
+                schedule_manual_teardown(&dead_for_sink);
             }
             GeminiEvent::Closed => {
                 eprintln!("speaker-core: gemini connection closed");
+                schedule_manual_teardown(&dead_for_sink);
             }
         }
     });
@@ -605,10 +612,20 @@ pub fn start_manual_session(
     // GeminiSession is `Send`; move a handle into the input callback so
     // we can forward gated frames to the upload task.
     let upload_handle = gemini.upload_handle();
+    let dead_for_input = session_dead.clone();
+    // Latches on first SendError so we log "upload channel closed" once
+    // per session, not once per cpal buffer (~100 times/sec).
+    let upload_log_armed = Arc::new(AtomicBool::new(true));
     let input_stream = input_device
         .build_input_stream(
             &in_stream_cfg,
             move |data: &[f32], _| {
+                // Short-circuit once the gemini session has died — no point
+                // running VAD or pushing into a dead channel. The teardown
+                // thread spawned from the sink will clean up the streams.
+                if dead_for_input.load(Ordering::SeqCst) {
+                    return;
+                }
                 let inv = 1.0 / input_channels as f32;
                 for frame in data.chunks_exact(input_channels) {
                     let sum: f32 = frame.iter().sum();
@@ -653,8 +670,15 @@ pub fn start_manual_session(
                     if let Err(e) = upload_handle.send(frame) {
                         // Channel closed — Gemini session is gone. Don't
                         // tear the audio path down from inside the cpal
-                        // callback; the next stop_manual_session() cleans up.
-                        eprintln!("speaker-core: gemini upload send failed: {e:?}");
+                        // callback; the teardown thread spawned from the
+                        // sink does that. Log once, then stay quiet until
+                        // a fresh session is started.
+                        if upload_log_armed
+                            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                            .is_ok()
+                        {
+                            eprintln!("speaker-core: gemini upload send failed: {e:?}");
+                        }
                         break;
                     }
                 }
@@ -695,5 +719,24 @@ pub fn stop_manual_session() {
             eprintln!("speaker-core: manual end_session failed: {e:?}");
         }
     }
+}
+
+/// Fire-and-forget teardown for a session whose Gemini connection has
+/// died. Called from the sink callback (which runs on the gemini
+/// thread); we *can't* call `stop_manual_session` inline because
+/// dropping `GeminiSession` joins that same thread → deadlock. The
+/// `dead` flag also serves as the once-only latch so an Error frame
+/// followed by Closed doesn't spawn two teardown threads.
+fn schedule_manual_teardown(dead: &Arc<AtomicBool>) {
+    if dead
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::Builder::new()
+        .name("manual-teardown".into())
+        .spawn(stop_manual_session)
+        .ok();
 }
 

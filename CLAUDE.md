@@ -100,7 +100,7 @@ These are flagged in the design as risks; if a task touches them, treat the desi
 - Audio routing: macOS may not auto-switch system output to a freshly connected Bluetooth speaker. Force-default-output helper is planned but its default (on/off) is decided in M6 after real-hardware testing.
 - HFP audio quality (mono 8/16 kHz) for a child's voice through Gemini Live STT — accepted on paper, verify in M6.
 - WebRTC VAD vs. Silero VAD — start with WebRTC; fall back to Silero only if real-room testing shows misfires.
-- Gemini Live safety settings defaults — pick something child-appropriate in M4, revisit in M6.
+- Gemini Live safety settings — the `BidiGenerateContent` setup rejects `safetySettings` (REST-only field). v0.1 relies on the model's built-in defaults plus the system-instruction persona. If real kid-voice testing surfaces problems, tighten the system instruction; there is no per-category threshold to tune on the Live endpoint.
 - Speaker auto-reconnect reliability is a Bluetooth-stack problem, not in scope to fix — document working speaker models instead.
 - FFI binding strategy (`uniffi` vs. hand-written C ABI vs. `swift-bridge`) — decide in M5 when the real surface lands.
 

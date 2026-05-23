@@ -72,7 +72,7 @@ impl GeminiError {
 /// Default model. Live API model ids live under `models/…`. The flash
 /// tier is the latency target for kid-voice turn-taking; the doc records
 /// this choice and why.
-pub const DEFAULT_MODEL: &str = "models/gemini-2.0-flash-live-001";
+pub const DEFAULT_MODEL: &str = "models/gemini-3.1-flash-live-preview";
 /// Input PCM contract — 16 kHz mono i16, native to libfvad and HFP.
 pub const INPUT_SAMPLE_RATE: u32 = 16_000;
 /// Gemini Live emits 24 kHz mono i16. The playback path resamples to
@@ -80,8 +80,10 @@ pub const INPUT_SAMPLE_RATE: u32 = 16_000;
 pub const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 
 /// System instruction nudged toward a friendly, age-appropriate persona.
-/// The hard safety floor lives in `SAFETY_SETTINGS`; this is the soft
-/// tone control.
+/// This is the only safety lever the Live API gives us — `safetySettings`
+/// is a REST-only field and `BidiGenerateContentSetup` rejects it. Hard
+/// thresholds therefore fall back to Gemini's built-in defaults; see
+/// `docs/v0.1-design.md` for the trade-off.
 const SYSTEM_INSTRUCTION: &str = concat!(
     "You are a kind, patient voice assistant for a child. ",
     "Speak in short, simple sentences. ",
@@ -89,16 +91,6 @@ const SYSTEM_INSTRUCTION: &str = concat!(
     "Never tell the child to hurt themselves or anyone else. ",
     "If you don't know something, say so."
 );
-
-/// Child-appropriate safety floor: block at the lowest probability tier
-/// across all four harm categories the Live API exposes. Recorded in
-/// `docs/v0.1-design.md`.
-const SAFETY_SETTINGS: &[(&str, &str)] = &[
-    ("HARM_CATEGORY_HARASSMENT", "BLOCK_LOW_AND_ABOVE"),
-    ("HARM_CATEGORY_HATE_SPEECH", "BLOCK_LOW_AND_ABOVE"),
-    ("HARM_CATEGORY_SEXUALLY_EXPLICIT", "BLOCK_LOW_AND_ABOVE"),
-    ("HARM_CATEGORY_DANGEROUS_CONTENT", "BLOCK_LOW_AND_ABOVE"),
-];
 
 /// Events emitted to the audio layer / session recorder. Lifecycle is
 /// intentionally narrow — anything richer (transcripts, tool calls)
@@ -271,7 +263,6 @@ struct Setup<'a> {
     model: &'a str,
     generation_config: GenerationConfig,
     system_instruction: SystemInstruction<'a>,
-    safety_settings: Vec<SafetySetting>,
 }
 
 #[derive(Serialize)]
@@ -291,12 +282,6 @@ struct TextPart<'a> {
 }
 
 #[derive(Serialize)]
-struct SafetySetting {
-    category: &'static str,
-    threshold: &'static str,
-}
-
-#[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RealtimeEnvelope {
     realtime_input: RealtimeInput,
@@ -305,12 +290,16 @@ struct RealtimeEnvelope {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RealtimeInput {
-    media_chunks: Vec<MediaChunk>,
+    // Current Live API field. The older `mediaChunks` array was
+    // deprecated and is now hard-rejected with WS code 1007. `audio`
+    // takes a single `Blob` per envelope; we already coalesce in the
+    // upload loop, so one envelope == one batched chunk is fine.
+    audio: AudioBlob,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MediaChunk {
+struct AudioBlob {
     mime_type: String,
     data: String,
 }
@@ -383,21 +372,39 @@ async fn run_session(
         "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={}",
         api_key
     );
+    eprintln!(
+        "speaker-core: gemini connecting model={} key=…{} (len {})",
+        model,
+        // Redact: last 4 chars only — enough to tell two keys apart in
+        // a log without leaking the secret.
+        &api_key[api_key.len().saturating_sub(4)..],
+        api_key.len(),
+    );
     let request = match url.as_str().into_client_request() {
         Ok(r) => r,
         Err(e) => {
+            eprintln!("speaker-core: gemini bad url: {e}");
             let _ = boot_tx.send(Err(GeminiError::Other(format!("bad url: {e}"))));
             return;
         }
     };
 
-    let (ws, _resp) = match tokio_tungstenite::connect_async(request).await {
+    let (ws, resp) = match tokio_tungstenite::connect_async(request).await {
         Ok(x) => x,
         Err(e) => {
+            eprintln!("speaker-core: gemini connect_async failed: {e}");
             let _ = boot_tx.send(Err(classify_connect_error(e)));
             return;
         }
     };
+    eprintln!(
+        "speaker-core: gemini ws upgraded http={} headers={:?}",
+        resp.status(),
+        resp.headers()
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, v.to_str().unwrap_or("<binary>")))
+            .collect::<Vec<_>>(),
+    );
 
     let (mut writer, mut reader) = ws.split();
 
@@ -413,26 +420,27 @@ async fn run_session(
                     text: SYSTEM_INSTRUCTION,
                 }],
             },
-            safety_settings: SAFETY_SETTINGS
-                .iter()
-                .map(|(c, t)| SafetySetting {
-                    category: c,
-                    threshold: t,
-                })
-                .collect(),
         },
     };
     let setup_json = match serde_json::to_string(&setup) {
         Ok(s) => s,
         Err(e) => {
+            eprintln!("speaker-core: gemini setup serialize: {e}");
             let _ = boot_tx.send(Err(GeminiError::Other(format!("setup serialize: {e}"))));
             return;
         }
     };
+    eprintln!(
+        "speaker-core: gemini sending setup ({} bytes): {}",
+        setup_json.len(),
+        setup_json,
+    );
     if let Err(e) = writer.send(Message::Text(setup_json.into())).await {
+        eprintln!("speaker-core: gemini setup send failed: {e}");
         let _ = boot_tx.send(Err(GeminiError::Network(format!("setup send: {e}"))));
         return;
     }
+    eprintln!("speaker-core: gemini setup sent, waiting for setupComplete");
 
     // Connect handshake succeeded. Setup-complete arrives over the read
     // task; the boot signal here is "the WebSocket is up", which is the
@@ -454,18 +462,39 @@ async fn run_session(
                     continue;
                 }
             };
-            let Some(msg) = next else { break };
+            let Some(msg) = next else {
+                eprintln!("speaker-core: gemini read stream ended (server closed without Close frame)");
+                break;
+            };
             match msg {
-                Ok(Message::Text(t)) => dispatch_server_text(&sink_read, &t),
+                Ok(Message::Text(t)) => {
+                    eprintln!("speaker-core: gemini recv text ({} bytes)", t.len());
+                    dispatch_server_text(&sink_read, &t);
+                }
                 Ok(Message::Binary(b)) => {
+                    eprintln!("speaker-core: gemini recv binary ({} bytes)", b.len());
                     // Some Live deployments deliver JSON as binary frames.
                     if let Ok(t) = std::str::from_utf8(&b) {
                         dispatch_server_text(&sink_read, t);
+                    } else {
+                        eprintln!("speaker-core: gemini binary frame is not valid UTF-8");
                     }
                 }
-                Ok(Message::Close(_)) => break,
-                Ok(_) => {}
+                Ok(Message::Close(frame)) => {
+                    match frame {
+                        Some(cf) => eprintln!(
+                            "speaker-core: gemini recv Close code={} reason={:?}",
+                            cf.code, cf.reason,
+                        ),
+                        None => eprintln!("speaker-core: gemini recv Close (no frame body)"),
+                    }
+                    break;
+                }
+                Ok(Message::Ping(_)) => eprintln!("speaker-core: gemini recv Ping"),
+                Ok(Message::Pong(_)) => eprintln!("speaker-core: gemini recv Pong"),
+                Ok(other) => eprintln!("speaker-core: gemini recv other frame: {other:?}"),
                 Err(e) => {
+                    eprintln!("speaker-core: gemini read error: {e}");
                     sink_read.handle(GeminiEvent::Error(GeminiError::Network(e.to_string())));
                     break;
                 }
@@ -507,10 +536,10 @@ async fn run_session(
             let data = B64.encode(bytes);
             let env = RealtimeEnvelope {
                 realtime_input: RealtimeInput {
-                    media_chunks: vec![MediaChunk {
+                    audio: AudioBlob {
                         mime_type: format!("audio/pcm;rate={INPUT_SAMPLE_RATE}"),
                         data,
-                    }],
+                    },
                 },
             };
             let json = match serde_json::to_string(&env) {
@@ -558,7 +587,15 @@ fn classify_connect_error(e: tokio_tungstenite::tungstenite::Error) -> GeminiErr
 fn dispatch_server_text(sink: &Arc<dyn EventSink>, text: &str) {
     let msg: ServerMessage = match serde_json::from_str(text) {
         Ok(m) => m,
-        Err(_) => return,
+        Err(_) => {
+            // Live can send error / status frames that don't match our
+            // narrow ServerMessage shape — dump them so a setup-time
+            // rejection is visible instead of silently dropped. Truncate
+            // so a giant inline-data payload can't flood stderr.
+            let truncated = if text.len() > 2048 { &text[..2048] } else { text };
+            eprintln!("speaker-core: gemini unparsed frame: {truncated}");
+            return;
+        }
     };
     if msg.setup_complete.is_some() {
         sink.handle(GeminiEvent::SetupComplete);
@@ -596,20 +633,6 @@ fn dispatch_server_text(sink: &Arc<dyn EventSink>, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn safety_settings_cover_all_four_categories() {
-        // Compile-time list, but assert the tags so a typo in the
-        // category string doesn't slip through silently.
-        let cats: Vec<&str> = SAFETY_SETTINGS.iter().map(|(c, _)| *c).collect();
-        assert!(cats.contains(&"HARM_CATEGORY_HARASSMENT"));
-        assert!(cats.contains(&"HARM_CATEGORY_HATE_SPEECH"));
-        assert!(cats.contains(&"HARM_CATEGORY_SEXUALLY_EXPLICIT"));
-        assert!(cats.contains(&"HARM_CATEGORY_DANGEROUS_CONTENT"));
-        for (_c, t) in SAFETY_SETTINGS {
-            assert_eq!(*t, "BLOCK_LOW_AND_ABOVE");
-        }
-    }
 
     #[test]
     fn error_codes_stable_and_unique() {
