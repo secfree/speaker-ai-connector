@@ -450,7 +450,7 @@ pub fn start_vad_diagnostic_with_engine(
                         "speaker-core: vad gate OPEN [{score}] (seen {session_frames} frames so far)",
                         score = relay.score_label()
                     );
-                    match recorder.begin_clip(ClipDirection::In) {
+                    match recorder.begin_clip(ClipDirection::In, INPUT_SAMPLE_RATE) {
                         Ok(begin) => {
                             fire_clip_event(ClipEvent::InputClipStarted {
                                 seq: begin.seq,
@@ -832,7 +832,7 @@ pub fn start_session(
             GeminiEvent::AudioChunk(samples) => {
                 let rec = SessionRecorder::instance();
                 if !out_clip_for_sink.load(Ordering::SeqCst) {
-                    match rec.begin_clip(ClipDirection::Out) {
+                    match rec.begin_clip(ClipDirection::Out, OUTPUT_SAMPLE_RATE) {
                         Ok(begin) => {
                             out_clip_for_sink.store(true, Ordering::SeqCst);
                             fire_clip_event(ClipEvent::OutputClipStarted {
@@ -1032,7 +1032,7 @@ pub fn start_session(
                     if let Err(e) = upload_handle.activity_start() {
                         log_upload_err(e);
                     }
-                    match recorder.begin_clip(ClipDirection::In) {
+                    match recorder.begin_clip(ClipDirection::In, INPUT_SAMPLE_RATE) {
                         Ok(begin) => {
                             fire_clip_event(ClipEvent::InputClipStarted {
                                 seq: begin.seq,

@@ -120,6 +120,14 @@ pub struct ClipMeta {
     pub duration_secs: f64,
     /// Filename relative to the session directory, e.g. `0001-in.wav`.
     pub file: String,
+    /// Sample rate of the clip's WAV. In and Out clips can differ — input
+    /// is the 16 kHz capture rate, output is whatever the responder emits
+    /// (Gemini Live: 24 kHz). Manifests written before this field landed
+    /// deserialize with `0`, meaning "fall back to the session-level rate";
+    /// current consumers (Swift `ClipInfo`) don't read this field — the
+    /// WAV header is the source of truth for playback.
+    #[serde(default)]
+    pub sample_rate: u32,
 }
 
 /// Returned by `begin_clip` — the live `DialogueView` needs the seq +
@@ -196,7 +204,8 @@ struct ActiveClip {
     seq: u32,
     direction: ClipDirection,
     offset_secs: f64,
-    started: Instant,
+    sample_rate: u32,
+    samples_written: u64,
     writer: WavWriter<BufWriter<File>>,
     file_name: String,
 }
@@ -274,7 +283,11 @@ impl SessionRecorder {
         Ok(id)
     }
 
-    pub fn begin_clip(&self, direction: ClipDirection) -> Result<ClipBegin, SessionError> {
+    pub fn begin_clip(
+        &self,
+        direction: ClipDirection,
+        sample_rate: u32,
+    ) -> Result<ClipBegin, SessionError> {
         let mut guard = self.state.lock().unwrap();
         let sess = guard.as_mut().ok_or(SessionError::NoActiveSession)?;
         if sess.active_clip.is_some() {
@@ -285,7 +298,7 @@ impl SessionRecorder {
         let path = sess.dir.join(&file_name);
         let spec = WavSpec {
             channels: 1,
-            sample_rate: sess.sample_rate,
+            sample_rate,
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
@@ -296,7 +309,8 @@ impl SessionRecorder {
             seq,
             direction,
             offset_secs: offset,
-            started: Instant::now(),
+            sample_rate,
+            samples_written: 0,
             writer,
             file_name,
         });
@@ -326,6 +340,7 @@ impl SessionRecorder {
                 .write_sample(s)
                 .map_err(|e| SessionError::Wav(e.to_string()))?;
         }
+        clip.samples_written = clip.samples_written.saturating_add(samples.len() as u64);
         Ok(())
     }
 
@@ -460,15 +475,24 @@ impl SessionRecorder {
 }
 
 fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<ClipEnd, SessionError> {
-    let duration = clip.started.elapsed().as_secs_f64();
     let ActiveClip {
         seq,
         direction,
         offset_secs,
+        sample_rate,
+        samples_written,
         writer,
         file_name,
-        ..
     } = clip;
+    // Duration is samples / sample_rate so the manifest agrees with what a
+    // player decodes from the WAV header. Wall-clock would drift whenever
+    // the producer paused mid-clip (the original bug — an open Out clip
+    // counted gaps between Gemini bursts as audio).
+    let duration = if sample_rate == 0 {
+        0.0
+    } else {
+        samples_written as f64 / sample_rate as f64
+    };
     writer
         .finalize()
         .map_err(|e| SessionError::Wav(e.to_string()))?;
@@ -479,6 +503,7 @@ fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<ClipEnd, 
         offset_secs,
         duration_secs: duration,
         file: file_name,
+        sample_rate,
     });
     sess.next_seq += 1;
     Ok(ClipEnd {
@@ -593,7 +618,7 @@ mod tests {
             .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
 
-        rec.begin_clip(ClipDirection::In).unwrap();
+        rec.begin_clip(ClipDirection::In, 16_000).unwrap();
         // 320 samples = 20 ms @ 16 kHz; write 5 frames worth.
         let frame = vec![0i16; 320];
         for _ in 0..5 {
@@ -612,6 +637,11 @@ mod tests {
         assert_eq!(clips[0].seq, 1);
         assert_eq!(clips[0].direction, ClipDirection::In);
         assert_eq!(clips[0].file, "0001-in.wav");
+        assert_eq!(clips[0].sample_rate, 16_000);
+        // 5 × 320 samples at 16 kHz = 0.1 s exactly. Sample-derived, not
+        // wall-clock — regression guard for the original bug where an
+        // Out clip showed 18.8 s wall-time but held ≈4 s of audio.
+        assert!((clips[0].duration_secs - 0.1).abs() < 1e-9);
 
         let path = rec.clip_path(&id, &clips[0].file).unwrap();
         assert!(path.is_file());
@@ -622,6 +652,34 @@ mod tests {
         assert_eq!(spec.sample_rate, 16_000);
         assert_eq!(spec.bits_per_sample, 16);
 
+        cleanup(&root);
+    }
+
+    #[test]
+    fn out_clip_uses_its_own_sample_rate() {
+        // Regression: the recorder used to stamp every clip with the
+        // session-level rate, so Gemini's 24 kHz Out samples landed in a
+        // WAV that claimed 16 kHz — playback came out 1.5× slower (deeper
+        // voice, lower quality). Each clip now carries its own rate.
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let id = rec
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
+            .unwrap();
+        rec.begin_clip(ClipDirection::Out, 24_000).unwrap();
+        // 24 000 samples at 24 kHz = exactly 1 s of audio.
+        rec.write_frames(ClipDirection::Out, &vec![0i16; 24_000])
+            .unwrap();
+        rec.end_clip(ClipDirection::Out).unwrap();
+        rec.end_session().unwrap();
+
+        let clips = rec.list_clips(&id).unwrap();
+        assert_eq!(clips[0].sample_rate, 24_000);
+        assert!((clips[0].duration_secs - 1.0).abs() < 1e-9);
+
+        let path = rec.clip_path(&id, &clips[0].file).unwrap();
+        let reader = hound::WavReader::open(&path).unwrap();
+        assert_eq!(reader.spec().sample_rate, 24_000);
         cleanup(&root);
     }
 
@@ -683,7 +741,7 @@ mod tests {
         let first = rec
             .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
-        rec.begin_clip(ClipDirection::In).unwrap();
+        rec.begin_clip(ClipDirection::In, 16_000).unwrap();
         rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
         rec.end_clip(ClipDirection::In).unwrap();
         rec.end_session().unwrap();
