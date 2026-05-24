@@ -20,7 +20,7 @@ struct SpeakerAIConnectorApp: App {
             // SF Symbol picked from the status so the menu-bar glyph
             // reflects the in-flight session at a glance. Wrapped in
             // `MenuBarLabel` so we have a long-lived SwiftUI view that
-            // can observe status transitions and auto-open the dialogue
+            // can observe status transitions and auto-open the Sessions
             // window for Bluetooth-driven sessions too (manual sessions
             // open the window from MenuContent's Start button).
             MenuBarLabel(iconName: menuIcon(for: coordinator.status))
@@ -33,18 +33,11 @@ struct SpeakerAIConnectorApp: App {
                 .environmentObject(coordinator)
         }
 
+        // Single home for past *and* present sessions. The detail pane
+        // surfaces a live status bar (Listening/Responding/Stop) when
+        // the selected row is the currently in-flight session.
         Window("Sessions", id: "sessions") {
             SessionsView()
-                .environmentObject(coordinator)
-        }
-        .windowResizability(.contentMinSize)
-
-        // v0.2 N2: live dialogue for the in-flight session. Manual
-        // sessions open it from MenuContent's Start button; Bluetooth
-        // sessions open it from `MenuBarLabel` when the status flips
-        // into a BT-in-flight variant.
-        Window("Dialogue", id: "dialogue") {
-            DialogueView()
                 .environmentObject(coordinator)
         }
         .windowResizability(.contentMinSize)
@@ -66,7 +59,7 @@ struct SpeakerAIConnectorApp: App {
 
 /// Always-rendered SwiftUI view sitting in the `MenuBarExtra` label slot.
 /// Renders the menu-bar glyph and — by piggy-backing on its persistent
-/// lifetime — auto-opens the Dialogue window whenever a Bluetooth-driven
+/// lifetime — auto-opens the Sessions window whenever a Bluetooth-driven
 /// session starts (or is already in flight when the app launches).
 ///
 /// Manual sessions open the window from `MenuContent`'s Start button, so
@@ -82,17 +75,17 @@ private struct MenuBarLabel: View {
         Image(systemName: iconName)
             .onAppear {
                 btInFlight = coordinator.status.bluetoothSessionInFlight
-                if btInFlight { presentDialogue() }
+                if btInFlight { presentSessions() }
             }
             .onChange(of: coordinator.status.bluetoothSessionInFlight) { oldValue, newValue in
                 btInFlight = newValue
-                if newValue && !oldValue { presentDialogue() }
+                if newValue && !oldValue { presentSessions() }
             }
     }
 
-    private func presentDialogue() {
+    private func presentSessions() {
         NSApp.activate(ignoringOtherApps: true)
-        openWindow(id: "dialogue")
+        openWindow(id: "sessions")
     }
 }
 
@@ -105,22 +98,17 @@ struct MenuContent: View {
         Text(coordinator.status.menuBarText)
         Divider()
         Button(startStopLabel) {
-            // Auto-open DialogueView when *starting* a manual session.
+            // Auto-open the Sessions window when *starting* a manual
+            // session so the user sees the live status + clip stream.
             // The BT path opens it from `MenuBarLabel` instead.
             let isStarting = !coordinator.status.manualSessionInFlight
             if isStarting {
                 NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "dialogue")
+                openWindow(id: "sessions")
             }
             coordinator.toggleManualSession()
         }
         .disabled(!startStopEnabled)
-        Button("Dialogue…") {
-            // Manual reopen path — useful after the user has closed the
-            // window and wants to peek at the in-flight session again.
-            NSApp.activate(ignoringOtherApps: true)
-            openWindow(id: "dialogue")
-        }
         Button("Sessions…") {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: "sessions")

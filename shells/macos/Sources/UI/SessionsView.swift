@@ -2,12 +2,20 @@ import SwiftUI
 import AVFoundation
 import AppKit
 
-/// Per-window viewer for past sessions: list on the left, clip detail
-/// on the right with a play button against each clip. Refresh re-reads
-/// the manifests via the FFI — there's no live event stream from the
-/// core yet (the recorder doesn't notify), so the user gets explicit
-/// refresh and an auto-refresh on appear.
+/// Single home for sessions — past *and* present. The sidebar lists every
+/// recorded session; the selected row's detail pane shows its clips with
+/// a Play button per row. When the selected row matches the currently
+/// in-flight session, the detail pane also shows a live status bar
+/// (Listening / Responding indicators + Stop button) and renders the
+/// clip list off the coordinator's in-memory event stream so in-progress
+/// clips appear immediately instead of waiting for the manifest flush.
+///
+/// This view replaces the older standalone Dialogue window — keeping one
+/// surface for "what the speaker is doing right now" and "what it did
+/// earlier" avoids the duplication where an ended session would appear
+/// in both places with two different playback paths.
 struct SessionsView: View {
+    @EnvironmentObject var coordinator: Coordinator
     @State private var sessions: [SessionInfo] = []
     @State private var selectedIds: Set<String> = []
     @State private var clips: [ClipInfo] = []
@@ -22,6 +30,15 @@ struct SessionsView: View {
         return sessions.first(where: { $0.id == id })
     }
 
+    /// The selected session is the one currently being recorded.
+    private var selectedIsLive: Bool {
+        guard let s = selectedSession,
+              let liveId = coordinator.currentSessionId,
+              coordinator.status.sessionInFlight
+        else { return false }
+        return s.id == liveId
+    }
+
     var body: some View {
         NavigationSplitView {
             sidebar
@@ -29,14 +46,31 @@ struct SessionsView: View {
             detail
         }
         .frame(minWidth: 640, minHeight: 380)
-        .onAppear { refresh() }
+        .onAppear {
+            refresh()
+            autoSelectLiveIfAny()
+        }
         .onChange(of: selectedIds) { _, _ in
-            if let s = selectedSession {
-                clips = SessionsStore.clips(for: s.id)
-            } else {
-                clips = []
-            }
+            reloadClipsForSelection()
             stop()
+        }
+        // A new live session opened — surface it, then jump-select it.
+        .onChange(of: coordinator.currentSessionId) { _, newId in
+            refresh()
+            if let id = newId, coordinator.status.sessionInFlight {
+                selectedIds = [id]
+            }
+        }
+        // In-flight transitions: on start, pick up the new live row
+        // (synthesizing it if the manifest hasn't flushed yet); on end,
+        // re-read so the manifest's final clip list replaces the
+        // in-memory feed on the now-static row.
+        .onChange(of: coordinator.status.sessionInFlight) { _, _ in
+            refresh()
+            if let id = coordinator.currentSessionId,
+               coordinator.status.sessionInFlight {
+                selectedIds = [id]
+            }
         }
         .alert(deleteAlertTitle, isPresented: $showDeleteConfirm) {
             Button("Cancel", role: .cancel) {
@@ -53,8 +87,11 @@ struct SessionsView: View {
 
     private var sidebar: some View {
         List(sessions, selection: $selectedIds) { session in
-            SessionRow(session: session)
-                .tag(session.id)
+            SessionRow(
+                session: session,
+                isLive: isLive(session)
+            )
+            .tag(session.id)
         }
         .listStyle(.sidebar)
         .navigationTitle("Sessions")
@@ -77,7 +114,6 @@ struct SessionsView: View {
             }
         }
         .onDeleteCommand {
-            // ⌫ — same path as the toolbar button.
             if !selectedIds.isEmpty {
                 requestDelete(ids: Array(selectedIds))
             }
@@ -87,11 +123,18 @@ struct SessionsView: View {
     @ViewBuilder
     private var detail: some View {
         if let selected = selectedSession {
-            ClipList(
+            SessionDetail(
                 session: selected,
-                clips: clips,
+                live: selectedIsLive ? LiveContext(
+                    gateOpen: coordinator.gateOpen,
+                    responding: coordinator.responding,
+                    rows: liveRows,
+                    canStop: coordinator.status.sessionInFlight,
+                    onStop: { coordinator.stopSession() }
+                ) : nil,
+                staticClips: selectedIsLive ? [] : clips,
                 nowPlayingClip: nowPlayingClip?.file,
-                onPlay: { clip in play(session: selected, clip: clip) },
+                onPlay: { file in play(session: selected, file: file) },
                 onStop: stop
             )
         } else if selectedIds.count > 1 {
@@ -123,15 +166,116 @@ struct SessionsView: View {
         return n == 1 ? "Delete this session?" : "Delete \(n) sessions?"
     }
 
+    private func isLive(_ session: SessionInfo) -> Bool {
+        coordinator.status.sessionInFlight && coordinator.currentSessionId == session.id
+    }
+
     private func refresh() {
-        sessions = SessionsStore.list()
+        var listed = SessionsStore.list()
+        // The session manifest is written asynchronously by the core, so
+        // a freshly-started session may not appear in the on-disk list
+        // for the first few hundred ms. Synthesize a stub from the
+        // coordinator's in-memory snapshot so the LIVE row is visible
+        // immediately; the next refresh after the manifest lands replaces
+        // it transparently (same id).
+        if let liveId = coordinator.currentSessionId,
+           coordinator.status.sessionInFlight,
+           !listed.contains(where: { $0.id == liveId }) {
+            let stub = SessionInfo(
+                id: liveId,
+                trigger: coordinator.currentSessionTrigger ?? "manual",
+                targetAddress: coordinator.targetAddress,
+                sampleRate: 0,
+                startUnixSecs: coordinator.currentSessionStartUnix ?? 0,
+                endUnixSecs: nil,
+                clipCount: 0,
+                clipDurationSecs: 0
+            )
+            listed.insert(stub, at: 0)
+        }
+        sessions = listed
         let existing = Set(sessions.map(\.id))
         selectedIds.formIntersection(existing)
-        if let s = selectedSession {
+        reloadClipsForSelection()
+    }
+
+    private func reloadClipsForSelection() {
+        if let s = selectedSession, !selectedIsLive {
             clips = SessionsStore.clips(for: s.id)
         } else {
             clips = []
         }
+    }
+
+    private func autoSelectLiveIfAny() {
+        guard selectedIds.isEmpty,
+              let liveId = coordinator.currentSessionId,
+              coordinator.status.sessionInFlight
+        else { return }
+        if sessions.contains(where: { $0.id == liveId }) {
+            selectedIds = [liveId]
+        }
+    }
+
+    // --- Live-mode rows: pair started/ended events from the in-memory feed.
+
+    private var liveRows: [LiveRowModel] {
+        var rows: [LiveRowModel] = []
+        var openInput: Int? = nil
+        var openOutput: Int? = nil
+        for event in coordinator.dialogueEvents {
+            switch event.kind {
+            case .inputClipStarted(_, let offset):
+                rows.append(LiveRowModel(
+                    id: event.seq,
+                    direction: .input,
+                    offsetMs: offset,
+                    durationMs: nil,
+                    path: nil
+                ))
+                openInput = rows.count - 1
+            case .inputClipEnded(_, let duration, let path):
+                if let idx = openInput {
+                    rows[idx].durationMs = duration
+                    rows[idx].path = path
+                    openInput = nil
+                } else {
+                    rows.append(LiveRowModel(
+                        id: event.seq,
+                        direction: .input,
+                        offsetMs: 0,
+                        durationMs: duration,
+                        path: path
+                    ))
+                }
+            case .outputClipStarted(_, let offset):
+                rows.append(LiveRowModel(
+                    id: event.seq,
+                    direction: .output,
+                    offsetMs: offset,
+                    durationMs: nil,
+                    path: nil
+                ))
+                openOutput = rows.count - 1
+            case .outputClipEnded(_, let duration, let path):
+                if let idx = openOutput {
+                    rows[idx].durationMs = duration
+                    rows[idx].path = path
+                    openOutput = nil
+                } else {
+                    rows.append(LiveRowModel(
+                        id: event.seq,
+                        direction: .output,
+                        offsetMs: 0,
+                        durationMs: duration,
+                        path: path
+                    ))
+                }
+            case .sessionStarted, .sessionEnded, .unknown:
+                continue
+            }
+        }
+        return rows
     }
 
     private func requestDelete(ids: [String]) {
@@ -141,9 +285,6 @@ struct SessionsView: View {
     }
 
     private func performDelete(ids: [String]) {
-        // If we're playing a clip from a session about to disappear,
-        // stop AVAudioPlayer first — otherwise the player keeps a file
-        // handle on a path that no longer exists.
         if let playing = nowPlayingClip, ids.contains(playing.sessionId) {
             stop()
         }
@@ -166,9 +307,9 @@ struct SessionsView: View {
         return "Failed to delete \(n) session\(n == 1 ? "" : "s")."
     }
 
-    private func play(session: SessionInfo, clip: ClipInfo) {
-        guard let url = SessionsStore.clipURL(sessionId: session.id, file: clip.file) else {
-            lastError = "Clip file missing: \(clip.file)"
+    private func play(session: SessionInfo, file: String) {
+        guard let url = SessionsStore.clipURL(sessionId: session.id, file: file) else {
+            lastError = "Clip file missing: \(file)"
             return
         }
         do {
@@ -178,7 +319,7 @@ struct SessionsView: View {
             player.play()
             playerHolder.player = player
             playerHolder.onFinish = { nowPlayingClip = nil }
-            nowPlayingClip = PlayingClip(sessionId: session.id, file: clip.file)
+            nowPlayingClip = PlayingClip(sessionId: session.id, file: file)
         } catch {
             lastError = "Playback failed: \(error.localizedDescription)"
         }
@@ -217,11 +358,17 @@ final class PlayerHolder: NSObject, AVAudioPlayerDelegate {
 
 private struct SessionRow: View {
     let session: SessionInfo
+    let isLive: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(formatStart(session.startUnixSecs))
-                .font(.system(.body, design: .default))
+            HStack(spacing: 6) {
+                Text(formatStart(session.startUnixSecs))
+                    .font(.system(.body, design: .default))
+                if isLive {
+                    LiveBadge()
+                }
+            }
             HStack(spacing: 8) {
                 Text(session.trigger.capitalized)
                 Text("·")
@@ -238,27 +385,86 @@ private struct SessionRow: View {
     }
 }
 
-private struct ClipList: View {
+private struct LiveBadge: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(Color.red)
+                .frame(width: 6, height: 6)
+            Text("LIVE")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.red)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.red.opacity(0.12))
+        )
+    }
+}
+
+/// Bundled live state passed into the detail pane. Nil when the selected
+/// session is not the in-flight one — the detail then falls back to the
+/// static manifest-driven clip list.
+private struct LiveContext {
+    let gateOpen: Bool
+    let responding: Bool
+    let rows: [LiveRowModel]
+    let canStop: Bool
+    let onStop: () -> Void
+}
+
+private struct LiveRowModel: Identifiable, Equatable {
+    let id: UInt64
+    let direction: Direction
+    let offsetMs: UInt64
+    var durationMs: UInt64?
+    var path: String?
+
+    enum Direction { case input, output }
+}
+
+private struct SessionDetail: View {
     let session: SessionInfo
-    let clips: [ClipInfo]
+    let live: LiveContext?
+    let staticClips: [ClipInfo]
     let nowPlayingClip: String?
-    let onPlay: (ClipInfo) -> Void
+    let onPlay: (String) -> Void
     let onStop: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            if clips.isEmpty {
+            if let live {
+                LiveStatusBar(live: live)
+                Divider()
+                if live.rows.isEmpty {
+                    LiveEmptyState()
+                } else {
+                    List(live.rows) { row in
+                        LiveClipRow(
+                            row: row,
+                            playing: row.path != nil && nowPlayingClip == fileName(of: row.path!),
+                            onPlay: {
+                                if let path = row.path { onPlay(fileName(of: path)) }
+                            },
+                            onStop: onStop
+                        )
+                    }
+                    .listStyle(.inset)
+                }
+            } else if staticClips.isEmpty {
                 Text("No clips recorded in this session.")
                     .foregroundStyle(.secondary)
                     .padding()
             } else {
-                List(clips) { clip in
+                List(staticClips) { clip in
                     ClipRow(
                         clip: clip,
                         playing: nowPlayingClip == clip.file,
-                        onPlay: { onPlay(clip) },
+                        onPlay: { onPlay(clip.file) },
                         onStop: onStop
                     )
                 }
@@ -268,19 +474,134 @@ private struct ClipList: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(formatStart(session.startUnixSecs))
-                .font(.headline)
+            HStack(spacing: 8) {
+                Text(formatStart(session.startUnixSecs))
+                    .font(.headline)
+                if live != nil {
+                    LiveBadge()
+                }
+            }
             HStack(spacing: 6) {
                 Label(session.trigger.capitalized, systemImage: session.trigger == "manual" ? "hand.tap" : "speaker.wave.2")
                 if let addr = session.targetAddress {
                     Text("· \(addr)")
                 }
-                Text("· \(session.sampleRate) Hz")
+                if session.sampleRate > 0 {
+                    Text("· \(session.sampleRate) Hz")
+                }
             }
             .font(.caption)
             .foregroundStyle(.secondary)
         }
         .padding(12)
+    }
+
+    /// Live rows carry the absolute clip path; the static `nowPlayingClip`
+    /// state is keyed by file name (what the manifest uses), so we match
+    /// on the trailing component to keep the play/stop toggle consistent
+    /// across the two render paths.
+    private func fileName(of path: String) -> String {
+        (path as NSString).lastPathComponent
+    }
+}
+
+private struct LiveStatusBar: View {
+    let live: LiveContext
+
+    var body: some View {
+        HStack(spacing: 14) {
+            indicator(
+                active: live.gateOpen,
+                onText: "Listening…",
+                offText: "Idle mic",
+                onColor: .blue
+            )
+            indicator(
+                active: live.responding,
+                onText: "Responding…",
+                offText: "Quiet",
+                onColor: .green
+            )
+            Spacer()
+            Button(role: .destructive) {
+                live.onStop()
+            } label: {
+                Label("Stop session", systemImage: "stop.circle")
+            }
+            .disabled(!live.canStop)
+            .help(live.canStop
+                  ? "Stop the live session"
+                  : "No active session to stop")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private func indicator(active: Bool, onText: String, offText: String, onColor: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(active ? onColor : Color.secondary.opacity(0.35))
+                .frame(width: 8, height: 8)
+            Text(active ? onText : offText)
+                .font(.caption)
+                .foregroundStyle(active ? Color.primary : Color.secondary)
+        }
+        .opacity(active ? 1.0 : 0.85)
+    }
+}
+
+private struct LiveEmptyState: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "ellipsis.bubble")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("Speak — clips will appear here.")
+                .foregroundStyle(.secondary)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
+private struct LiveClipRow: View {
+    let row: LiveRowModel
+    let playing: Bool
+    let onPlay: () -> Void
+    let onStop: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: row.direction == .input ? "mic" : "speaker.wave.2.fill")
+                .foregroundStyle(row.direction == .input ? Color.blue : Color.green)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(row.direction == .input ? "Input" : "Response")
+                    .font(.body)
+                HStack(spacing: 6) {
+                    Text("+\(formatMs(row.offsetMs))")
+                    if let dur = row.durationMs {
+                        Text("· \(formatMs(dur))")
+                    } else {
+                        Text("· in progress…")
+                            .italic()
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if row.path != nil {
+                Button(action: playing ? onStop : onPlay) {
+                    Image(systemName: playing ? "stop.fill" : "play.fill")
+                }
+                .buttonStyle(.borderless)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+            }
+        }
+        .padding(.vertical, 2)
     }
 }
 
@@ -321,7 +642,7 @@ private struct EmptyStateView: View {
                 .foregroundStyle(.secondary)
             Text("No sessions yet")
                 .font(.headline)
-            Text("Start the VAD diagnostic from Settings, speak a few utterances, then refresh.")
+            Text("Start a session from the menu bar, or connect your speaker.")
                 .multilineTextAlignment(.center)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: 320)
@@ -350,4 +671,14 @@ private func formatDuration(_ secs: Double) -> String {
     let minutes = Int(secs) / 60
     let remaining = Int(secs) % 60
     return "\(minutes)m \(remaining)s"
+}
+
+private func formatMs(_ ms: UInt64) -> String {
+    let secs = Double(ms) / 1000.0
+    if secs < 60 {
+        return String(format: "%.1fs", secs)
+    }
+    let m = Int(secs) / 60
+    let s = Int(secs) % 60
+    return "\(m)m \(s)s"
 }
