@@ -38,6 +38,18 @@ final class BluetoothWatcher: NSObject {
 
     func start() {
         guard connectObserver == nil else { return }
+        // Pre-warm the macOS Bluetooth TCC prompt. `register(forConnect
+        // Notifications:)` alone doesn't trip the privacy gate — the
+        // system only checks on the first real notification delivery,
+        // which is the same instant we kick off the audio session. The
+        // prompt then sits on screen and wedges CoreAudio process-wide:
+        // every `default_output_config` query returns "Invalid property
+        // value" until the user clicks Allow, and the first BT-driven
+        // session dies with `DefaultOutputConfig(...)`. Calling
+        // `pairedDevices()` here touches privileged device data, so the
+        // prompt appears at app launch — before any connect event — and
+        // by the time a speaker actually connects, permission is settled.
+        _ = IOBluetoothDevice.pairedDevices()
         connectObserver = IOBluetoothDevice.register(
             forConnectNotifications: self,
             selector: #selector(handleConnect(_:device:))

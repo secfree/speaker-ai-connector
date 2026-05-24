@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, Stream, StreamConfig};
+use cpal::{Device, SampleFormat, SampleRate, Stream, StreamConfig};
 
 use crate::gemini::{
     EventSink, GeminiError, GeminiEvent, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE,
@@ -598,6 +598,45 @@ fn secs_to_ms(secs: f64) -> u64 {
     }
 }
 
+/// Render a device's supported configs into a single log line so a
+/// `default_*_config` failure carries enough context to tell whether
+/// the device is genuinely format-less (HFP link not up yet) or just
+/// momentarily unhappy.
+fn summarize_supported_configs(device: &Device, output: bool) -> String {
+    let listed = if output {
+        device.supported_output_configs().map(|it| {
+            it.map(|c| {
+                format!(
+                    "{:?}/{}ch/{}-{}Hz",
+                    c.sample_format(),
+                    c.channels(),
+                    c.min_sample_rate().0,
+                    c.max_sample_rate().0,
+                )
+            })
+            .collect::<Vec<_>>()
+        })
+    } else {
+        device.supported_input_configs().map(|it| {
+            it.map(|c| {
+                format!(
+                    "{:?}/{}ch/{}-{}Hz",
+                    c.sample_format(),
+                    c.channels(),
+                    c.min_sample_rate().0,
+                    c.max_sample_rate().0,
+                )
+            })
+            .collect::<Vec<_>>()
+        })
+    };
+    match listed {
+        Ok(v) if v.is_empty() => "no supported configs reported".into(),
+        Ok(v) => format!("supported: [{}]", v.join(", ")),
+        Err(e) => format!("supported_configs query also failed: {e}"),
+    }
+}
+
 /// Bounded so a runaway response can't pin unbounded memory. ~5 s of
 /// 24 kHz mono i16 = 240 kB — well under any reasonable response burst.
 const PLAYBACK_QUEUE_CAP_SAMPLES: usize = 24_000 * 5;
@@ -628,12 +667,32 @@ pub fn start_session(
     let host = cpal::default_host();
     let input_device = host.default_input_device().ok_or(AudioError::NoInputDevice)?;
     let output_device = host.default_output_device().ok_or(AudioError::NoOutputDevice)?;
+    let input_name = input_device.name().unwrap_or_else(|_| "<unknown>".into());
+    let output_name = output_device.name().unwrap_or_else(|_| "<unknown>".into());
+    eprintln!(
+        "speaker-core: session({:?}) default input={:?} output={:?}",
+        trigger, input_name, output_name
+    );
     let input_cfg = input_device
         .default_input_config()
-        .map_err(|e| AudioError::DefaultInputConfig(e.to_string()))?;
+        .map_err(|e| {
+            eprintln!(
+                "speaker-core: default_input_config failed on {:?}: {e} ({})",
+                input_name,
+                summarize_supported_configs(&input_device, /* output */ false),
+            );
+            AudioError::DefaultInputConfig(e.to_string())
+        })?;
     let output_cfg = output_device
         .default_output_config()
-        .map_err(|e| AudioError::DefaultOutputConfig(e.to_string()))?;
+        .map_err(|e| {
+            eprintln!(
+                "speaker-core: default_output_config failed on {:?}: {e} ({})",
+                output_name,
+                summarize_supported_configs(&output_device, /* output */ true),
+            );
+            AudioError::DefaultOutputConfig(e.to_string())
+        })?;
     if input_cfg.sample_format() != SampleFormat::F32
         || output_cfg.sample_format() != SampleFormat::F32
     {
@@ -645,8 +704,8 @@ pub fn start_session(
     let output_rate = output_cfg.sample_rate().0;
     let output_channels = output_cfg.channels() as usize;
     eprintln!(
-        "speaker-core: session({:?}, responder={:?}) input {}Hz/{}ch → relay {}Hz/1ch ({:?}); output queue {}Hz/1ch → {}Hz/{}ch",
-        trigger, responder_kind, input_rate, input_channels, INPUT_SAMPLE_RATE, sensitivity, OUTPUT_SAMPLE_RATE, output_rate, output_channels
+        "speaker-core: session({:?}, responder={:?}) input {:?} {}Hz/{}ch → relay {}Hz/1ch ({:?}); output queue {}Hz/1ch → {:?} {}Hz/{}ch",
+        trigger, responder_kind, input_name, input_rate, input_channels, INPUT_SAMPLE_RATE, sensitivity, OUTPUT_SAMPLE_RATE, output_name, output_rate, output_channels
     );
 
     // Open the on-disk session before connecting Gemini — if the recorder

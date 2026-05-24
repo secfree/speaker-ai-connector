@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 
 @main
@@ -10,6 +11,24 @@ struct SpeakerAIConnectorApp: App {
         // has selected the Silero VAD engine in Settings; missing the
         // file falls back to WebRTC, so we log but don't crash.
         SileroModelLoader.register()
+
+        // Pre-warm the macOS Microphone TCC prompt. If we wait until a
+        // BT connect arrives, the first launch races the privacy dialog
+        // — cpal's `default_output_config` (and every other CoreAudio
+        // property query in the process) returns "Invalid property
+        // value" until the user clicks Allow, and the first session
+        // dies with `DefaultOutputConfig(...)`. Doing it here means
+        // the prompt fires once at app startup, before any event from
+        // `BluetoothWatcher` reaches the core. The other start paths
+        // (manual / test-now / loopback / VAD diag) already gate on
+        // `AVCaptureDevice.authorizationStatus`; only the BT auto-
+        // launch path skipped that check, and pre-warming covers it
+        // without adding event-deferral logic.
+        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
+            Task.detached {
+                _ = await AVCaptureDevice.requestAccess(for: .audio)
+            }
+        }
     }
 
     var body: some Scene {
