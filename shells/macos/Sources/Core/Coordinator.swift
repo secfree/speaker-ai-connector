@@ -151,6 +151,13 @@ enum ResponderKind: UInt8, CaseIterable, Identifiable, Codable {
         default: return nil
         }
     }
+
+    var tomlVariant: String {
+        switch self {
+        case .gemini: return "Gemini"
+        case .nope: return "Nope"
+        }
+    }
 }
 
 /// Decoded shape of the JSON returned by `speaker_core_settings_get`.

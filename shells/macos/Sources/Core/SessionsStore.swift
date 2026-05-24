@@ -14,6 +14,9 @@ struct SessionInfo: Identifiable, Hashable, Decodable {
     let endUnixSecs: UInt64?
     let clipCount: Int
     let clipDurationSecs: Double
+    /// Responder that handled the session — `nil` on legacy manifests
+    /// written before the field landed.
+    let responder: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -24,6 +27,7 @@ struct SessionInfo: Identifiable, Hashable, Decodable {
         case endUnixSecs = "end_unix_secs"
         case clipCount = "clip_count"
         case clipDurationSecs = "clip_duration_secs"
+        case responder
     }
 }
 

@@ -96,7 +96,7 @@ pub extern "C" fn speaker_core_vad_diagnostic_start(sensitivity: u8) -> i32 {
         None => return -101,
     };
     let recorder = SessionRecorder::instance();
-    if let Err(e) = recorder.start_session(SessionTrigger::Manual, None, 16_000) {
+    if let Err(e) = recorder.start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Nope) {
         eprintln!("speaker-core: vad diagnostic session start failed: {e:?}");
         return e.code();
     }
@@ -158,7 +158,7 @@ pub extern "C" fn speaker_core_vad_diagnostic_start_v2(engine: u8, tuning: u16) 
         }
     };
     let recorder = SessionRecorder::instance();
-    if let Err(e) = recorder.start_session(SessionTrigger::Manual, None, 16_000) {
+    if let Err(e) = recorder.start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Nope) {
         eprintln!("speaker-core: vad diagnostic session start failed: {e:?}");
         return e.code();
     }

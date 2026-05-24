@@ -214,7 +214,8 @@ struct SessionsView: View {
                 startUnixSecs: coordinator.currentSessionStartUnix ?? 0,
                 endUnixSecs: nil,
                 clipCount: 0,
-                clipDurationSecs: 0
+                clipDurationSecs: 0,
+                responder: coordinator.responder.tomlVariant
             )
             listed.insert(stub, at: 0)
         }
@@ -397,6 +398,8 @@ private struct SessionRow: View {
             HStack(spacing: 8) {
                 Text(session.trigger.capitalized)
                 Text("·")
+                Text(formatResponder(session.responder))
+                Text("·")
                 Text("\(session.clipCount) clip\(session.clipCount == 1 ? "" : "s")")
                 if session.clipDurationSecs > 0 {
                     Text("·")
@@ -508,6 +511,7 @@ private struct SessionDetail: View {
             }
             HStack(spacing: 6) {
                 Label(session.trigger.capitalized, systemImage: session.trigger == "manual" ? "hand.tap" : "speaker.wave.2")
+                Text("· \(formatResponder(session.responder))")
                 if let addr = session.targetAddress {
                     Text("· \(addr)")
                 }
@@ -727,6 +731,16 @@ private func formatDuration(_ secs: Double) -> String {
     let minutes = Int(secs) / 60
     let remaining = Int(secs) % 60
     return "\(minutes)m \(remaining)s"
+}
+
+/// Display label for the manifest's responder field. Legacy sessions
+/// recorded before the field landed show "unknown" rather than guessing.
+private func formatResponder(_ raw: String?) -> String {
+    guard let raw else { return "Unknown responder" }
+    if let kind = ResponderKind(tomlVariant: raw) {
+        return kind.label
+    }
+    return raw
 }
 
 private func formatMs(_ ms: UInt64) -> String {

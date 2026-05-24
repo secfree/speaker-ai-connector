@@ -31,6 +31,8 @@ use directories::ProjectDirs;
 use hound::{SampleFormat, WavSpec, WavWriter};
 use serde::{Deserialize, Serialize};
 
+use crate::responder::ResponderKind;
+
 const MANIFEST_VERSION: u32 = 1;
 
 #[derive(Debug)]
@@ -104,6 +106,9 @@ pub struct SessionMeta {
     pub clip_count: usize,
     /// Sum of clip durations (not wall-clock session length).
     pub clip_duration_secs: f64,
+    /// Responder that handled this session. `None` on manifests written
+    /// before v0.2 added the field — the Sessions UI shows "unknown".
+    pub responder: Option<ResponderKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -181,6 +186,9 @@ struct Manifest {
     end_iso: Option<String>,
     start_unix_secs: u64,
     end_unix_secs: Option<u64>,
+    /// Absent on manifests written before v0.2.
+    #[serde(default)]
+    responder: Option<ResponderKind>,
     clips: Vec<ClipMeta>,
 }
 
@@ -201,6 +209,7 @@ struct ActiveSession {
     trigger: SessionTrigger,
     target_address: Option<String>,
     sample_rate: u32,
+    responder: ResponderKind,
     next_seq: u32,
     clips: Vec<ClipMeta>,
     active_clip: Option<ActiveClip>,
@@ -239,6 +248,7 @@ impl SessionRecorder {
         trigger: SessionTrigger,
         target_address: Option<String>,
         sample_rate: u32,
+        responder: ResponderKind,
     ) -> Result<String, SessionError> {
         let mut guard = self.state.lock().unwrap();
         if guard.is_some() {
@@ -256,6 +266,7 @@ impl SessionRecorder {
             trigger,
             target_address,
             sample_rate,
+            responder,
             next_seq: 1,
             clips: Vec::new(),
             active_clip: None,
@@ -348,6 +359,7 @@ impl SessionRecorder {
             end_iso: Some(format_iso_utc(end_unix)),
             start_unix_secs: sess.start_unix_secs,
             end_unix_secs: Some(end_unix),
+            responder: Some(sess.responder),
             clips: sess.clips.clone(),
         };
         let bytes = serde_json::to_vec_pretty(&manifest)
@@ -386,6 +398,7 @@ impl SessionRecorder {
                 end_unix_secs: manifest.end_unix_secs,
                 clip_count: manifest.clips.len(),
                 clip_duration_secs: total,
+                responder: manifest.responder,
             });
         }
         metas.sort_by(|a, b| b.start_unix_secs.cmp(&a.start_unix_secs));
@@ -577,7 +590,7 @@ mod tests {
         let root = tmp_root();
         let rec = SessionRecorder::new(root.clone());
         let id = rec
-            .start_session(SessionTrigger::Manual, None, 16_000)
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
 
         rec.begin_clip(ClipDirection::In).unwrap();
@@ -616,10 +629,10 @@ mod tests {
     fn double_start_rejected() {
         let root = tmp_root();
         let rec = SessionRecorder::new(root.clone());
-        rec.start_session(SessionTrigger::Manual, None, 16_000)
+        rec.start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
         let err = rec
-            .start_session(SessionTrigger::Manual, None, 16_000)
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap_err();
         assert!(matches!(err, SessionError::AlreadyActive));
         rec.end_session().unwrap();
@@ -630,7 +643,7 @@ mod tests {
     fn end_clip_without_begin_errors() {
         let root = tmp_root();
         let rec = SessionRecorder::new(root.clone());
-        rec.start_session(SessionTrigger::Manual, None, 16_000)
+        rec.start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
         let err = rec.end_clip(ClipDirection::In).unwrap_err();
         assert!(matches!(err, SessionError::NoActiveClip));
@@ -646,13 +659,13 @@ mod tests {
         // Orphan directory without a manifest — must be skipped.
         fs::create_dir_all(root.join("orphan-dir")).unwrap();
 
-        rec.start_session(SessionTrigger::Manual, None, 16_000)
+        rec.start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
         rec.end_session().unwrap();
         // Tiny sleep so the two sessions land on distinct unix seconds.
         std::thread::sleep(std::time::Duration::from_secs(1));
         let second = rec
-            .start_session(SessionTrigger::Manual, None, 16_000)
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
         rec.end_session().unwrap();
 
@@ -668,7 +681,7 @@ mod tests {
         let rec = SessionRecorder::new(root.clone());
 
         let first = rec
-            .start_session(SessionTrigger::Manual, None, 16_000)
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
         rec.begin_clip(ClipDirection::In).unwrap();
         rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
@@ -677,7 +690,7 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_secs(1));
 
         let second = rec
-            .start_session(SessionTrigger::Manual, None, 16_000)
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
         rec.end_session().unwrap();
 
@@ -722,7 +735,7 @@ mod tests {
         let root = tmp_root();
         let rec = SessionRecorder::new(root.clone());
         let id = rec
-            .start_session(SessionTrigger::Manual, None, 16_000)
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
         let err = rec.delete_session(&id).unwrap_err();
         assert!(matches!(err, SessionError::ActiveSessionInUse(_)));
