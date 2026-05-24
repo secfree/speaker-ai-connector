@@ -42,7 +42,7 @@ expanding the original.
 - [done] `SettingsView`: add a "Responder" picker (Gemini / Nope). When `Nope` is selected, dim/hide the API-key field and skip the "no API key" gating on the menu-bar "Start session" item. The picker sits above the API-key section; the section is hidden entirely for Nope (vs. dimmed) so the user isn't nagged about a key they don't need. `startStopEnabled` and the Settings "Test now" button both treat Nope as "no key required".
 - [done] Coordinator: when responder is `Nope`, don't surface the `NoApiKey` error; session lifecycle (Launching → SessionActive → TearingDown) still runs so the UI behaves identically. `do_launch` constructs `ResponderInit::Nope` directly for the Nope path — no `config::get_api_key` call, so the `NoApiKey` code path is unreachable.
 - [done] Unit tests: responder selection round-trips through config; `NopeResponder` produces no output clips; switching responder mid-config doesn't affect an active session (takes effect on the next start). Covered by `config::tests::settings_roundtrip_through_toml`, `config::tests::responder_defaults_to_gemini_for_older_configs`, `responder::tests::nope_responder_swallows_input_frames`, and `responder::tests::switching_kind_mid_session_does_not_disturb_active_init` (the per-session `ResponderInit` is captured by value at start).
-- [todo] Verify on hardware: select Nope, start a manual session, speak, confirm input clips are recorded and no output clips/audio are produced; switch back to Gemini, confirm normal behavior.
+- [done] Verify on hardware: select Nope, start a manual session, speak, confirm input clips are recorded and no output clips/audio are produced; switch back to Gemini, confirm normal behavior.
 
 ---
 
