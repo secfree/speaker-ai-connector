@@ -113,6 +113,65 @@ pub extern "C" fn speaker_core_vad_diagnostic_start(sensitivity: u8) -> i32 {
     }
 }
 
+/// v0.3 N3: run the diagnostic against a chosen engine + tuning. `engine`
+/// is `0` (WebRTC) / `1` (Silero); `tuning` is `0..=3` for WebRTC
+/// (sensitivity) or `0..=1000` for Silero (probability threshold,
+/// 0.0..=1.0). Same semantics as `speaker_core_settings_set_vad_threshold`
+/// so the shell can hand the picker/slider value through unchanged.
+///
+/// Returns 0 on success, `-101` if `engine` or `tuning` is out of range,
+/// `-201` if the Silero engine was requested on a build without the
+/// `silero` cargo feature, otherwise a negative `AudioError::code()` /
+/// `SessionError::code()` on capture or session-open failure.
+///
+/// The original `_start(sensitivity)` symbol is preserved alongside this
+/// one until M5 cleanup — the FFI surface is still pre-1.0, but the
+/// menu-bar item in the shell already routes to `_v2`.
+#[no_mangle]
+pub extern "C" fn speaker_core_vad_diagnostic_start_v2(engine: u8, tuning: u16) -> i32 {
+    let kind = match VadEngineKind::from_level(engine) {
+        Some(k) => k,
+        None => return -101,
+    };
+    let (sensitivity, silero_threshold) = match kind {
+        VadEngineKind::WebRtc => {
+            let level = match u8::try_from(tuning) {
+                Ok(l) => l,
+                Err(_) => return -101,
+            };
+            let s = match WebRtcSensitivity::from_level(level) {
+                Some(s) => s,
+                None => return -101,
+            };
+            (s, 0u16)
+        }
+        VadEngineKind::Silero => {
+            if tuning > 1000 {
+                return -101;
+            }
+            // Silero ignores `sensitivity`, but `build_vad_relay`'s fallback
+            // path (silero selected on a build without the feature, or with
+            // no model registered) needs a usable WebRTC level. Default to
+            // the most restrictive — it's what the WebRTC-only experience
+            // already biases toward.
+            (WebRtcSensitivity::VeryAggressive, tuning)
+        }
+    };
+    let recorder = SessionRecorder::instance();
+    if let Err(e) = recorder.start_session(SessionTrigger::Manual, None, 16_000) {
+        eprintln!("speaker-core: vad diagnostic session start failed: {e:?}");
+        return e.code();
+    }
+    match audio::start_vad_diagnostic_with_engine(kind, sensitivity, silero_threshold) {
+        Ok(()) => 0,
+        Err(e) => {
+            let _ = recorder.end_session();
+            eprintln!("speaker-core: vad diagnostic start failed: {e:?}");
+            e.code()
+        }
+    }
+}
+
 /// Idempotent — safe to call when no diagnostic is running.
 #[no_mangle]
 pub extern "C" fn speaker_core_vad_diagnostic_stop() {

@@ -94,6 +94,41 @@ enum VadSensitivity: UInt8, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// Mirrors `speaker_core::vad::VadEngineKind`. The TOML stores the
+/// variant name (`"WebRtc"` / `"Silero"`); the FFI setter takes the 0/1
+/// level. v0.3 N1 / N3.
+enum VadEngine: UInt8, CaseIterable, Identifiable, Codable {
+    case webRtc = 0
+    case silero = 1
+
+    var id: UInt8 { rawValue }
+
+    var label: String {
+        switch self {
+        case .webRtc: return "WebRTC (fast, no model)"
+        case .silero: return "Silero (neural VAD)"
+        }
+    }
+
+    /// Inline help shown under the picker.
+    var helpText: String {
+        switch self {
+        case .webRtc:
+            return "Fast, no model, may misfire on speaker bleed-through or background noise."
+        case .silero:
+            return "Neural VAD, more robust against non-speech sounds. Ships ~1 MB of weights inside the app and runs on CPU."
+        }
+    }
+
+    init?(tomlVariant: String) {
+        switch tomlVariant {
+        case "WebRtc": self = .webRtc
+        case "Silero": self = .silero
+        default: return nil
+        }
+    }
+}
+
 /// Mirrors `speaker_core::responder::ResponderKind`. The TOML stores the
 /// variant name; the FFI setter takes a 0/1 level.
 enum ResponderKind: UInt8, CaseIterable, Identifiable, Codable {
@@ -122,7 +157,9 @@ enum ResponderKind: UInt8, CaseIterable, Identifiable, Codable {
 private struct SettingsPayload: Decodable {
     let targetAddress: String?
     let model: String
+    let vadEngine: String?
     let vadSensitivity: String
+    let sileroThreshold: UInt16?
     let silenceTimeoutMs: UInt32
     let forceDefaultOutput: Bool
     let responder: String?
@@ -130,7 +167,9 @@ private struct SettingsPayload: Decodable {
     enum CodingKeys: String, CodingKey {
         case targetAddress = "target_address"
         case model
+        case vadEngine = "vad_engine"
         case vadSensitivity = "vad_sensitivity"
+        case sileroThreshold = "silero_threshold"
         case silenceTimeoutMs = "silence_timeout_ms"
         case forceDefaultOutput = "force_default_output"
         case responder
@@ -279,6 +318,15 @@ final class Coordinator: ObservableObject {
     @Published var vadSensitivity: VadSensitivity {
         didSet { if oldValue != vadSensitivity { persistVadSensitivity() } }
     }
+    /// Which VAD engine the audio path constructs. v0.3 N1.
+    @Published var vadEngine: VadEngine {
+        didSet { if oldValue != vadEngine { persistVadEngine() } }
+    }
+    /// Silero VAD threshold (0..=1000 → 0.0..=1.0). Only consulted when
+    /// `vadEngine == .silero`. v0.3 N1 / N3.
+    @Published var sileroThreshold: UInt16 {
+        didSet { if oldValue != sileroThreshold { persistSileroThreshold() } }
+    }
     /// Model id (e.g. `models/gemini-3.1-flash-live-preview`). Editable
     /// in Settings for debugging; persisted to TOML.
     @Published var model: String {
@@ -316,6 +364,8 @@ final class Coordinator: ObservableObject {
         self.targetAddress = nil
         self.forceDefaultOutput = false
         self.vadSensitivity = .quality
+        self.vadEngine = .webRtc
+        self.sileroThreshold = 500
         self.model = ""
         self.responder = .gemini
         apiKeyStored = (speaker_core_api_key_has() == 1)
@@ -340,6 +390,12 @@ final class Coordinator: ObservableObject {
             self.model = p.model
             if let s = VadSensitivity(tomlVariant: p.vadSensitivity) {
                 self.vadSensitivity = s
+            }
+            if let raw = p.vadEngine, let e = VadEngine(tomlVariant: raw) {
+                self.vadEngine = e
+            }
+            if let t = p.sileroThreshold {
+                self.sileroThreshold = t
             }
             if let raw = p.responder, let r = ResponderKind(tomlVariant: raw) {
                 self.responder = r
@@ -375,6 +431,21 @@ final class Coordinator: ObservableObject {
         guard !loadingSettings else { return }
         let rc = speaker_core_settings_set_vad_sensitivity(vadSensitivity.rawValue)
         if rc != 0 { log.error("settings_set_vad_sensitivity failed: \(rc)") }
+    }
+
+    private func persistVadEngine() {
+        guard !loadingSettings else { return }
+        let rc = speaker_core_settings_set_vad_engine(vadEngine.rawValue)
+        if rc != 0 { log.error("settings_set_vad_engine failed: \(rc)") }
+    }
+
+    private func persistSileroThreshold() {
+        guard !loadingSettings else { return }
+        // The unified threshold setter is engine-aware on the core side
+        // — it routes to silero_threshold when vad_engine == Silero, so
+        // the Swift slider doesn't need to branch on the engine itself.
+        let rc = speaker_core_settings_set_vad_threshold(sileroThreshold)
+        if rc != 0 { log.error("settings_set_vad_threshold failed: \(rc)") }
     }
 
     private func persistModel() {
@@ -556,7 +627,13 @@ final class Coordinator: ObservableObject {
     }
 
     private func beginVadDiagnostic() {
-        let rc = speaker_core_vad_diagnostic_start(vadSensitivity.rawValue)
+        // v0.3 N3: route through `_v2` so the diagnostic respects the
+        // user's chosen engine. WebRTC tuning is the sensitivity level;
+        // Silero tuning is the persisted threshold.
+        let tuning: UInt16 = (vadEngine == .silero)
+            ? sileroThreshold
+            : UInt16(vadSensitivity.rawValue)
+        let rc = speaker_core_vad_diagnostic_start_v2(vadEngine.rawValue, tuning)
         guard rc == 0 else {
             status = .error("VAD diagnostic failed (code \(rc))")
             return

@@ -76,8 +76,21 @@ targets:
         SWIFT_OBJC_BRIDGING_HEADER: Sources/App/SpeakerAIConnector-Bridging-Header.h
         LIBRARY_SEARCH_PATHS:
           - $(SRCROOT)/../../core/target/debug
+        # v0.3 N2: the `silero` feature pulls in `ort` -> ONNX Runtime,
+        # whose static archive is bundled into libspeaker_core.a and
+        # references C++ ABI symbols (`__cxa_throw`, `__cxa_rethrow`,
+        # `__gxx_personality_v0`) plus Foundation/Security/iconv. A
+        # pure-Swift target doesn't auto-link any of those, so the .app
+        # fails to link without these explicit flags. `cargo rustc
+        # --print=native-static-libs` is the source for the list.
         OTHER_LDFLAGS:
           - -lspeaker_core
+          - -lc++
+          - -liconv
+          - -framework
+          - Foundation
+          - -framework
+          - Security
       configs:
         Release:
           LIBRARY_SEARCH_PATHS:

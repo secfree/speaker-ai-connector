@@ -131,16 +131,38 @@ struct SettingsView: View {
             }
 
             Section("Voice activity") {
-                Picker("VAD sensitivity", selection: $coordinator.vadSensitivity) {
-                    ForEach(VadSensitivity.allCases) { level in
-                        Text(level.label).tag(level)
+                Picker("VAD engine", selection: $coordinator.vadEngine) {
+                    ForEach(VadEngine.allCases) { engine in
+                        Text(engine.label).tag(engine)
                     }
                 }
                 .pickerStyle(.menu)
                 .disabled(coordinator.vadDiagnosticRunning || coordinator.status.sessionInFlight)
-                Text("Higher sensitivity rejects more non-speech but also drops quieter voices. Lower is better for a child's voice in a quiet room.")
+                Text(coordinator.vadEngine.helpText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                switch coordinator.vadEngine {
+                case .webRtc:
+                    Picker("WebRTC sensitivity", selection: $coordinator.vadSensitivity) {
+                        ForEach(VadSensitivity.allCases) { level in
+                            Text(level.label).tag(level)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .disabled(coordinator.vadDiagnosticRunning || coordinator.status.sessionInFlight)
+                    Text("Higher sensitivity rejects more non-speech but also drops quieter voices. Lower is better for a child's voice in a quiet room.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .silero:
+                    sileroThresholdSlider
+                    Text("Higher threshold = stricter voice detection. 0.5 is the upstream default; raise it if background noise still opens the gate.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("Silero VAD model — MIT license, github.com/snakers4/silero-vad.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Model") {
@@ -163,7 +185,7 @@ struct SettingsView: View {
                 Button(coordinator.vadDiagnosticRunning ? "Stop VAD diagnostic" : "Start VAD diagnostic") {
                     coordinator.toggleVadDiagnostic()
                 }
-                Text("Routes your default input through the WebRTC VAD relay. Each gate open/close pair is recorded as a clip under the sessions folder.")
+                Text("Routes your default input through the selected VAD engine. Each gate open/close pair is recorded as a clip under the sessions folder; the engine name and last decision score are logged alongside each transition for A/B comparison.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -206,6 +228,35 @@ struct SettingsView: View {
         // something to open on a fresh install.
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         NSWorkspace.shared.activateFileViewerSelecting([root])
+    }
+
+    /// 0–1 slider snapped to 0.05 steps, persisted as the underlying
+    /// 0..=1000 fixed-point on the Rust side. Building it inline in the
+    /// section body bloats the SwiftUI view tree past the type-checker's
+    /// timeout budget, so keep it pulled out.
+    @ViewBuilder
+    private var sileroThresholdSlider: some View {
+        let bind = Binding<Double>(
+            get: { Double(coordinator.sileroThreshold) / 1000.0 },
+            set: { newValue in
+                // Snap to the nearest 0.05 step before persisting so the
+                // displayed value matches what gets stored.
+                let snapped = (newValue * 20.0).rounded() / 20.0
+                let clamped = min(max(snapped, 0.0), 1.0)
+                coordinator.sileroThreshold = UInt16((clamped * 1000.0).rounded())
+            }
+        )
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Silero threshold")
+                Spacer()
+                Text(String(format: "%.2f", Double(coordinator.sileroThreshold) / 1000.0))
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+            Slider(value: bind, in: 0...1, step: 0.05)
+                .disabled(coordinator.vadDiagnosticRunning || coordinator.status.sessionInFlight)
+        }
     }
 
     private var targetBinding: Binding<String?> {

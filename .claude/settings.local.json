@@ -40,7 +40,9 @@
       "Read(//private/tmp/**)",
       "Bash(say -v Samantha -o silero_test.aiff -r 175 \"Hello, this is a short test of the voice activity detector. It should detect speech clearly.\")",
       "Bash(afconvert -f WAVE -d LEI16@16000 -c 1 silero_test.aiff /Users/secfree/projects/github/secfree/speaker-ai-connector/core/speaker-core/tests/fixtures/silero_speech.wav)",
-      "Bash(file /Users/secfree/projects/github/secfree/speaker-ai-connector/core/speaker-core/tests/fixtures/silero_speech.wav && rm -f /tmp/silero_test.aiff)"
+      "Bash(file /Users/secfree/projects/github/secfree/speaker-ai-connector/core/speaker-core/tests/fixtures/silero_speech.wav && rm -f /tmp/silero_test.aiff)",
+      "Bash(cargo rustc *)",
+      "Bash(ls -lah /Users/secfree/projects/github/secfree/speaker-ai-connector/core/target/debug/libspeaker_core.a 2>&1; ls /Users/secfree/Library/Caches/ort.pyke.io/dfbin/aarch64-apple-darwin/*/onnxruntime/lib/ 2>&1 | head)"
     ]
   }
 }

@@ -238,18 +238,23 @@ const VAD_PREROLL_FRAMES: usize = 15;
 /// gate actually closes between turns.
 const VAD_HANGOVER_FRAMES: usize = 35;
 
-/// Build the per-session `VadRelay` honoring the user-selected engine.
+/// Build a `VadRelay` for the given engine + tuning. Used by the AI
+/// session path (which reads its engine + tuning from `Settings`) and the
+/// v0.3 N3 diagnostic (which takes them as direct arguments so the user
+/// can A/B both engines from the menu bar without flipping settings).
 ///
-/// WebRTC: uses the supplied `sensitivity`. Silero: ignores it and reads
-/// `silero_threshold` + the registered model path. If the user selected
-/// Silero but either (a) the core was built without the `silero` cargo
-/// feature, or (b) the shell never registered a model path, we log and
-/// fall back to WebRTC — preferable to refusing to start the session
-/// over an engine selection the user can't see from a missing menu-bar
-/// item.
-fn build_session_vad_relay(sensitivity: WebRtcSensitivity) -> Result<VadRelay, AudioError> {
-    let settings = Settings::current();
-    match settings.vad_engine {
+/// `silero_threshold` is only consulted when `engine == Silero`. If the
+/// user selected Silero but either (a) the core was built without the
+/// `silero` cargo feature, or (b) the shell never registered a model
+/// path, we log and fall back to WebRTC with the provided `sensitivity`
+/// — preferable to refusing to start over an engine selection the user
+/// can't see from a missing menu-bar item.
+fn build_vad_relay(
+    engine: VadEngineKind,
+    sensitivity: WebRtcSensitivity,
+    silero_threshold: u16,
+) -> Result<VadRelay, AudioError> {
+    match engine {
         VadEngineKind::WebRtc => VadRelay::new_webrtc(
             INPUT_SAMPLE_RATE,
             VAD_FRAME_MS,
@@ -264,15 +269,15 @@ fn build_session_vad_relay(sensitivity: WebRtcSensitivity) -> Result<VadRelay, A
                 match crate::vad_silero::model_path() {
                     Some(path) => {
                         eprintln!(
-                            "speaker-core: session vad engine = silero (threshold={}, model={})",
-                            settings.silero_threshold,
+                            "speaker-core: vad engine = silero (threshold={}, model={})",
+                            silero_threshold,
                             path.display()
                         );
                         VadRelay::new_silero(
                             INPUT_SAMPLE_RATE,
                             VAD_FRAME_MS,
                             path,
-                            settings.silero_threshold,
+                            silero_threshold,
                             VAD_PREROLL_FRAMES,
                             VAD_HANGOVER_FRAMES,
                         )
@@ -296,6 +301,7 @@ fn build_session_vad_relay(sensitivity: WebRtcSensitivity) -> Result<VadRelay, A
             }
             #[cfg(not(feature = "silero"))]
             {
+                let _ = silero_threshold;
                 eprintln!(
                     "speaker-core: silero engine selected but core built without `silero` feature — \
                      falling back to WebRTC (sensitivity={sensitivity:?})"
@@ -313,6 +319,14 @@ fn build_session_vad_relay(sensitivity: WebRtcSensitivity) -> Result<VadRelay, A
     }
 }
 
+/// Build the per-session `VadRelay` honoring the user-selected engine
+/// in `Settings`. Thin wrapper over `build_vad_relay` so the session path
+/// and the diagnostic share the same WebRTC/Silero construction logic.
+fn build_session_vad_relay(sensitivity: WebRtcSensitivity) -> Result<VadRelay, AudioError> {
+    let settings = Settings::current();
+    build_vad_relay(settings.vad_engine, sensitivity, settings.silero_threshold)
+}
+
 struct VadHandle {
     _input: Stream,
 }
@@ -324,7 +338,20 @@ fn vad_slot() -> &'static Mutex<Option<VadHandle>> {
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
+/// Convenience wrapper kept for the original FFI entry — runs the
+/// diagnostic against the WebRTC engine at the given sensitivity.
 pub fn start_vad_diagnostic(sensitivity: WebRtcSensitivity) -> Result<(), AudioError> {
+    start_vad_diagnostic_with_engine(VadEngineKind::WebRtc, sensitivity, 0)
+}
+
+/// v0.3 N3: A/B both engines from the menu bar without restarting a
+/// session. `sensitivity` is consulted when `engine == WebRtc`;
+/// `silero_threshold` (0..=1000) when `engine == Silero`.
+pub fn start_vad_diagnostic_with_engine(
+    engine: VadEngineKind,
+    sensitivity: WebRtcSensitivity,
+    silero_threshold: u16,
+) -> Result<(), AudioError> {
     let mut guard = vad_slot().lock().unwrap();
     if guard.is_some() {
         return Err(AudioError::AlreadyRunning);
@@ -342,8 +369,8 @@ pub fn start_vad_diagnostic(sensitivity: WebRtcSensitivity) -> Result<(), AudioE
     let input_rate = input_cfg.sample_rate().0;
     let input_channels = input_cfg.channels() as usize;
     eprintln!(
-        "speaker-core: vad diagnostic input {}Hz/{}ch → relay {}Hz/1ch ({:?})",
-        input_rate, input_channels, VAD_SAMPLE_RATE, sensitivity
+        "speaker-core: vad diagnostic input {}Hz/{}ch → relay {}Hz/1ch (engine={:?}, sensitivity={:?}, silero_threshold={})",
+        input_rate, input_channels, VAD_SAMPLE_RATE, engine, sensitivity, silero_threshold
     );
 
     let in_stream_cfg = StreamConfig {
@@ -352,14 +379,7 @@ pub fn start_vad_diagnostic(sensitivity: WebRtcSensitivity) -> Result<(), AudioE
         buffer_size: cpal::BufferSize::Default,
     };
 
-    let relay = VadRelay::new_webrtc(
-        VAD_SAMPLE_RATE,
-        VAD_FRAME_MS,
-        sensitivity,
-        VAD_PREROLL_FRAMES,
-        VAD_HANGOVER_FRAMES,
-    )
-    .map_err(|e| AudioError::VadInit(format!("{e:?}")))?;
+    let relay = build_vad_relay(engine, sensitivity, silero_threshold)?;
 
     // Linear-interpolation resampler state (input_rate → 16 kHz mono).
     // Trivial — same approach as the M2 loopback's output resampler.
@@ -426,7 +446,8 @@ pub fn start_vad_diagnostic(sensitivity: WebRtcSensitivity) -> Result<(), AudioE
                 let recorder = SessionRecorder::instance();
                 if out.opened {
                     eprintln!(
-                        "speaker-core: vad gate OPEN (seen {session_frames} frames so far)"
+                        "speaker-core: vad gate OPEN [{score}] (seen {session_frames} frames so far)",
+                        score = relay.score_label()
                     );
                     match recorder.begin_clip(ClipDirection::In) {
                         Ok(begin) => {
@@ -463,7 +484,8 @@ pub fn start_vad_diagnostic(sensitivity: WebRtcSensitivity) -> Result<(), AudioE
                         }
                     }
                     eprintln!(
-                        "speaker-core: vad gate CLOSED (forwarded {forwarded_frames} of {session_frames} frames)"
+                        "speaker-core: vad gate CLOSED [{score}] (forwarded {forwarded_frames} of {session_frames} frames)",
+                        score = relay.score_label()
                     );
                 }
             },
@@ -838,6 +860,10 @@ pub fn start_session(
                 let out = relay.process(&batch);
                 let recorder = SessionRecorder::instance();
                 if out.opened {
+                    eprintln!(
+                        "speaker-core: vad gate OPEN [{score}]",
+                        score = relay.score_label()
+                    );
                     match recorder.begin_clip(ClipDirection::In) {
                         Ok(begin) => {
                             fire_clip_event(ClipEvent::InputClipStarted {
@@ -871,6 +897,10 @@ pub fn start_session(
                     }
                 }
                 if out.closed {
+                    eprintln!(
+                        "speaker-core: vad gate CLOSED [{score}]",
+                        score = relay.score_label()
+                    );
                     match recorder.end_clip(ClipDirection::In) {
                         Ok(end) => {
                             fire_clip_event(ClipEvent::InputClipEnded {

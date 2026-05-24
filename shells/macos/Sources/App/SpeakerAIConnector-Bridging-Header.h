@@ -38,6 +38,15 @@ int speaker_core_vad_diagnostic_start(unsigned char sensitivity);
 // Safe to call when no diagnostic is running.
 void speaker_core_vad_diagnostic_stop(void);
 
+// v0.3 N3: A/B both VAD engines from the menu bar. `engine` is 0
+// (WebRTC) / 1 (Silero); `tuning` is 0..=3 for WebRTC (sensitivity) or
+// 0..=1000 for Silero (probability threshold, fixed-point of 0.0..=1.0).
+// The legacy `_start` symbol above is kept until M5 cleanup; new shell
+// code should call this one. Returns 0 on success, -101 for out-of-range
+// engine/tuning, -201 if Silero was requested on a build without the
+// `silero` cargo feature, otherwise negative AudioError / SessionError.
+int speaker_core_vad_diagnostic_start_v2(unsigned char engine, unsigned short tuning);
+
 // Session history (M4) — file paths and JSON metadata only; raw PCM
 // never crosses the FFI line. All returned strings are UTF-8 NUL-
 // terminated and must be freed with speaker_core_string_free.
@@ -164,7 +173,9 @@ char *speaker_core_coord_simulate_disconnect(void);
 // TOML at <data-dir>/config.toml. JSON shape:
 //   { "target_address": "aa:bb:..." | null,
 //     "model": "models/gemini-...",
+//     "vad_engine": "WebRtc" | "Silero",        (v0.3 N1)
 //     "vad_sensitivity": "Quality" | "LowBitrate" | "Aggressive" | "VeryAggressive",
+//     "silero_threshold": 0..=1000,             (v0.3 N1; 0.0..=1.0 ×1000)
 //     "silence_timeout_ms": 700,
 //     "force_default_output": false,
 //     "responder": "Gemini" | "Nope" }
@@ -181,5 +192,12 @@ int speaker_core_settings_set_silence_timeout_ms(unsigned int ms);
 int speaker_core_settings_set_force_default_output(int enabled);
 // Responder level: 0 = Gemini (default), 1 = Nope.
 int speaker_core_settings_set_responder(unsigned char level);
+// v0.3 N1: VAD engine level — 0 = WebRTC (default), 1 = Silero.
+int speaker_core_settings_set_vad_engine(unsigned char level);
+// v0.3 N1: unified per-engine tuning setter — semantics depend on the
+// currently-persisted vad_engine: WebRTC: 0..=3 sensitivity; Silero:
+// 0..=1000 probability threshold (fixed-point of 0.0..=1.0). Returns
+// -101 on out-of-range.
+int speaker_core_settings_set_vad_threshold(unsigned short value);
 
 #endif

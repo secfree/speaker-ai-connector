@@ -276,6 +276,13 @@ impl VadRelay {
         self.gate.open
     }
 
+    /// Engine-name + last score label for the v0.3 N3 diagnostic log
+    /// (`vad gate OPEN/CLOSED ...`). Delegates to `VadEngine::score_label`
+    /// so callers don't need to match on the engine variant themselves.
+    pub fn score_label(&self) -> String {
+        self.engine.score_label()
+    }
+
     pub fn process(&mut self, samples: &[i16]) -> ProcessOutput {
         self.pending.extend_from_slice(samples);
         let mut out = ProcessOutput::default();
