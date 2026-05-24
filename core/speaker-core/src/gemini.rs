@@ -126,8 +126,18 @@ where
     }
 }
 
+/// Items the cpal callback hands to the WebSocket write task. Audio and
+/// activity markers share one queue so ordering is preserved without a
+/// second mpsc + interleave step (an activityEnd that overtook a trailing
+/// audio batch would be a wire-protocol bug).
+enum UploadItem {
+    Audio(Vec<i16>),
+    ActivityStart,
+    ActivityEnd,
+}
+
 pub struct GeminiSession {
-    upload_tx: mpsc::UnboundedSender<Vec<i16>>,
+    upload_tx: mpsc::UnboundedSender<UploadItem>,
     shutdown: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
@@ -142,7 +152,7 @@ impl GeminiSession {
             return Err(GeminiError::NoApiKey);
         }
 
-        let (upload_tx, upload_rx) = mpsc::unbounded_channel::<Vec<i16>>();
+        let (upload_tx, upload_rx) = mpsc::unbounded_channel::<UploadItem>();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_thread = shutdown.clone();
         let sink_thread = sink.clone();
@@ -203,7 +213,25 @@ impl GeminiSession {
     /// Returns `Err` only if the session has been torn down.
     pub fn send_audio(&self, samples: &[i16]) -> Result<(), GeminiError> {
         self.upload_tx
-            .send(samples.to_vec())
+            .send(UploadItem::Audio(samples.to_vec()))
+            .map_err(|_| GeminiError::Other("upload channel closed".into()))
+    }
+
+    /// Signal the start of a user turn. Paired with [`send_activity_end`].
+    /// Required because the setup envelope disables Gemini's server-side
+    /// automatic activity detection — without these markers the model
+    /// never commits a turn.
+    pub fn send_activity_start(&self) -> Result<(), GeminiError> {
+        self.upload_tx
+            .send(UploadItem::ActivityStart)
+            .map_err(|_| GeminiError::Other("upload channel closed".into()))
+    }
+
+    /// Signal end-of-turn. After this fires Gemini decodes the buffered
+    /// utterance and emits a model response.
+    pub fn send_activity_end(&self) -> Result<(), GeminiError> {
+        self.upload_tx
+            .send(UploadItem::ActivityEnd)
             .map_err(|_| GeminiError::Other("upload channel closed".into()))
     }
 
@@ -218,13 +246,25 @@ impl GeminiSession {
 
 #[derive(Clone)]
 pub struct UploadHandle {
-    tx: mpsc::UnboundedSender<Vec<i16>>,
+    tx: mpsc::UnboundedSender<UploadItem>,
 }
 
 impl UploadHandle {
     pub fn send(&self, samples: &[i16]) -> Result<(), GeminiError> {
         self.tx
-            .send(samples.to_vec())
+            .send(UploadItem::Audio(samples.to_vec()))
+            .map_err(|_| GeminiError::Other("upload channel closed".into()))
+    }
+
+    pub fn activity_start(&self) -> Result<(), GeminiError> {
+        self.tx
+            .send(UploadItem::ActivityStart)
+            .map_err(|_| GeminiError::Other("upload channel closed".into()))
+    }
+
+    pub fn activity_end(&self) -> Result<(), GeminiError> {
+        self.tx
+            .send(UploadItem::ActivityEnd)
             .map_err(|_| GeminiError::Other("upload channel closed".into()))
     }
 
@@ -241,7 +281,7 @@ impl Drop for GeminiSession {
         // Replace the sender with a dead one so the runtime's recv()
         // returns None on the next tick — without this the write task
         // would idle until the next 100 ms sleep + shutdown poll fires.
-        let (closed_tx, _) = mpsc::unbounded_channel::<Vec<i16>>();
+        let (closed_tx, _) = mpsc::unbounded_channel::<UploadItem>();
         let _ = std::mem::replace(&mut self.upload_tx, closed_tx);
         if let Some(j) = self.join.take() {
             let _ = j.join();
@@ -263,12 +303,30 @@ struct Setup<'a> {
     model: &'a str,
     generation_config: GenerationConfig,
     system_instruction: SystemInstruction<'a>,
+    realtime_input_config: RealtimeInputConfig,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GenerationConfig {
     response_modalities: Vec<&'static str>,
+}
+
+// Disable Gemini's server-side automatic VAD: the Rust core already gates
+// uploads with libfvad/Silero and drops silent frames on the floor, so the
+// server never sees a silence transition. Without this flag, Gemini buffers
+// indefinitely and never emits a turn. With it, the client owns turn
+// boundaries and signals them with activityStart / activityEnd frames.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RealtimeInputConfig {
+    automatic_activity_detection: AutomaticActivityDetection,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AutomaticActivityDetection {
+    disabled: bool,
 }
 
 #[derive(Serialize)]
@@ -361,7 +419,7 @@ fn ensure_crypto_provider() {
 async fn run_session(
     api_key: String,
     model: String,
-    mut upload_rx: mpsc::UnboundedReceiver<Vec<i16>>,
+    mut upload_rx: mpsc::UnboundedReceiver<UploadItem>,
     sink: Arc<dyn EventSink>,
     shutdown: Arc<AtomicBool>,
     boot_tx: std::sync::mpsc::SyncSender<Result<(), GeminiError>>,
@@ -419,6 +477,9 @@ async fn run_session(
                 parts: vec![TextPart {
                     text: SYSTEM_INSTRUCTION,
                 }],
+            },
+            realtime_input_config: RealtimeInputConfig {
+                automatic_activity_detection: AutomaticActivityDetection { disabled: true },
             },
         },
     };
@@ -503,12 +564,75 @@ async fn run_session(
         sink_read.handle(GeminiEvent::Closed);
     });
 
-    // Upload loop: drain mpsc, base64, send. Coalesces small frames into
-    // one JSON envelope per iteration to avoid hammering the websocket.
+    // Upload loop: drain mpsc, base64, send. Coalesces small audio frames
+    // into one JSON envelope per iteration to avoid hammering the
+    // websocket. Activity markers flush any buffered audio first so the
+    // server receives audio strictly before the activityEnd that closes
+    // its turn — otherwise it would emit a response from an empty buffer.
     let write_shutdown = shutdown.clone();
     let write_sink = sink.clone();
     let write_task = tokio::spawn(async move {
-        loop {
+        // Pending audio waiting to be coalesced. Cleared on flush.
+        let mut pending: Vec<i16> = Vec::new();
+
+        async fn flush_audio<W>(
+            writer: &mut W,
+            pending: &mut Vec<i16>,
+            sink: &Arc<dyn EventSink>,
+        ) -> bool
+        where
+            W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+        {
+            if pending.is_empty() {
+                return true;
+            }
+            let bytes: Vec<u8> = pending.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let data = B64.encode(bytes);
+            let env = RealtimeEnvelope {
+                realtime_input: RealtimeInput {
+                    audio: AudioBlob {
+                        mime_type: format!("audio/pcm;rate={INPUT_SAMPLE_RATE}"),
+                        data,
+                    },
+                },
+            };
+            pending.clear();
+            let json = match serde_json::to_string(&env) {
+                Ok(s) => s,
+                Err(e) => {
+                    sink.handle(GeminiEvent::Error(GeminiError::Other(format!(
+                        "upload serialize: {e}"
+                    ))));
+                    return false;
+                }
+            };
+            if let Err(e) = writer.send(Message::Text(json.into())).await {
+                sink.handle(GeminiEvent::Error(GeminiError::Network(format!(
+                    "upload send: {e}"
+                ))));
+                return false;
+            }
+            true
+        }
+
+        async fn send_marker<W>(
+            writer: &mut W,
+            json: &'static str,
+            sink: &Arc<dyn EventSink>,
+        ) -> bool
+        where
+            W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+        {
+            if let Err(e) = writer.send(Message::Text(json.into())).await {
+                sink.handle(GeminiEvent::Error(GeminiError::Network(format!(
+                    "activity marker send: {e}"
+                ))));
+                return false;
+            }
+            true
+        }
+
+        'outer: loop {
             if write_shutdown.load(Ordering::SeqCst) {
                 break;
             }
@@ -519,43 +643,83 @@ async fn run_session(
                 }
             };
             let Some(first) = first else { break };
-            let mut batch: Vec<i16> = first;
-            // Opportunistically drain anything queued so a busy capture
-            // path doesn't backlog. Bounded so we never base64 an
-            // unbounded buffer in one shot.
-            while batch.len() < 16_000 {
+            match first {
+                UploadItem::Audio(samples) => {
+                    pending.extend_from_slice(&samples);
+                }
+                UploadItem::ActivityStart => {
+                    eprintln!("speaker-core: gemini sending activityStart");
+                    if !send_marker(
+                        &mut writer,
+                        r#"{"realtimeInput":{"activityStart":{}}}"#,
+                        &write_sink,
+                    )
+                    .await
+                    {
+                        break 'outer;
+                    }
+                    continue;
+                }
+                UploadItem::ActivityEnd => {
+                    if !flush_audio(&mut writer, &mut pending, &write_sink).await {
+                        break 'outer;
+                    }
+                    eprintln!("speaker-core: gemini sending activityEnd");
+                    if !send_marker(
+                        &mut writer,
+                        r#"{"realtimeInput":{"activityEnd":{}}}"#,
+                        &write_sink,
+                    )
+                    .await
+                    {
+                        break 'outer;
+                    }
+                    continue;
+                }
+            }
+            // Opportunistically drain queued audio so a busy capture path
+            // doesn't backlog. Bounded so we never base64 an unbounded
+            // buffer in one shot. Activity markers break the drain and
+            // flush before being emitted.
+            while pending.len() < 16_000 {
                 match upload_rx.try_recv() {
-                    Ok(v) => batch.extend_from_slice(&v),
+                    Ok(UploadItem::Audio(v)) => pending.extend_from_slice(&v),
+                    Ok(UploadItem::ActivityStart) => {
+                        if !flush_audio(&mut writer, &mut pending, &write_sink).await {
+                            break 'outer;
+                        }
+                        eprintln!("speaker-core: gemini sending activityStart");
+                        if !send_marker(
+                            &mut writer,
+                            r#"{"realtimeInput":{"activityStart":{}}}"#,
+                            &write_sink,
+                        )
+                        .await
+                        {
+                            break 'outer;
+                        }
+                        continue 'outer;
+                    }
+                    Ok(UploadItem::ActivityEnd) => {
+                        if !flush_audio(&mut writer, &mut pending, &write_sink).await {
+                            break 'outer;
+                        }
+                        eprintln!("speaker-core: gemini sending activityEnd");
+                        if !send_marker(
+                            &mut writer,
+                            r#"{"realtimeInput":{"activityEnd":{}}}"#,
+                            &write_sink,
+                        )
+                        .await
+                        {
+                            break 'outer;
+                        }
+                        continue 'outer;
+                    }
                     Err(_) => break,
                 }
             }
-            let bytes: Vec<u8> = batch
-                .iter()
-                .flat_map(|s| s.to_le_bytes())
-                .collect();
-            let data = B64.encode(bytes);
-            let env = RealtimeEnvelope {
-                realtime_input: RealtimeInput {
-                    audio: AudioBlob {
-                        mime_type: format!("audio/pcm;rate={INPUT_SAMPLE_RATE}"),
-                        data,
-                    },
-                },
-            };
-            let json = match serde_json::to_string(&env) {
-                Ok(s) => s,
-                Err(e) => {
-                    write_sink.handle(GeminiEvent::Error(GeminiError::Other(format!(
-                        "upload serialize: {e}"
-                    ))));
-                    break;
-                }
-            };
-            if let Err(e) = writer.send(Message::Text(json.into())).await {
-                write_sink
-                    .handle(GeminiEvent::Error(GeminiError::Network(format!(
-                        "upload send: {e}"
-                    ))));
+            if !flush_audio(&mut writer, &mut pending, &write_sink).await {
                 break;
             }
         }

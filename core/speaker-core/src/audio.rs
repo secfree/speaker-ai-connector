@@ -1008,11 +1008,30 @@ pub fn start_session(
                 }
                 let out = relay.process(&batch);
                 let recorder = SessionRecorder::instance();
+                // Helper closure: log a Gemini channel-closed error once
+                // per session and latch. Both audio and activity sends
+                // share the same channel, so a single armed flag covers
+                // all three call sites below.
+                let log_upload_err = |e: GeminiError| {
+                    if upload_log_armed
+                        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        eprintln!("speaker-core: gemini upload send failed: {e:?}");
+                    }
+                };
                 if out.opened {
                     eprintln!(
                         "speaker-core: vad gate OPEN [{score}]",
                         score = relay.score_label()
                     );
+                    // activityStart goes out *before* the first speech
+                    // frame so the server sees a clean turn boundary.
+                    // Server-side automatic VAD is disabled, so without
+                    // this the model never commits a turn.
+                    if let Err(e) = upload_handle.activity_start() {
+                        log_upload_err(e);
+                    }
                     match recorder.begin_clip(ClipDirection::In) {
                         Ok(begin) => {
                             fire_clip_event(ClipEvent::InputClipStarted {
@@ -1034,14 +1053,8 @@ pub fn start_session(
                         // Channel closed — Gemini session is gone. Don't
                         // tear the audio path down from inside the cpal
                         // callback; the teardown thread spawned from the
-                        // sink does that. Log once, then stay quiet until
-                        // a fresh session is started.
-                        if upload_log_armed
-                            .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
-                            .is_ok()
-                        {
-                            eprintln!("speaker-core: gemini upload send failed: {e:?}");
-                        }
+                        // sink does that.
+                        log_upload_err(e);
                         break;
                     }
                 }
@@ -1050,6 +1063,13 @@ pub fn start_session(
                         "speaker-core: vad gate CLOSED [{score}]",
                         score = relay.score_label()
                     );
+                    // activityEnd goes out *after* the last speech frame
+                    // in this batch; the write task flushes any pending
+                    // audio before emitting the marker so the server
+                    // decodes a complete utterance.
+                    if let Err(e) = upload_handle.activity_end() {
+                        log_upload_err(e);
+                    }
                     match recorder.end_clip(ClipDirection::In) {
                         Ok(end) => {
                             fire_clip_event(ClipEvent::InputClipEnded {

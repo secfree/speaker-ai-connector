@@ -120,6 +120,23 @@ impl ResponderUploadHandle {
             ResponderUploadHandle::Nope => Ok(()),
         }
     }
+
+    /// Turn-boundary signal. Gemini Live requires explicit start/end
+    /// markers because the setup envelope disables its server-side VAD;
+    /// the Nope variant has no remote endpoint so the call is a no-op.
+    pub fn activity_start(&self) -> Result<(), GeminiError> {
+        match self {
+            ResponderUploadHandle::Gemini(h) => h.activity_start(),
+            ResponderUploadHandle::Nope => Ok(()),
+        }
+    }
+
+    pub fn activity_end(&self) -> Result<(), GeminiError> {
+        match self {
+            ResponderUploadHandle::Gemini(h) => h.activity_end(),
+            ResponderUploadHandle::Nope => Ok(()),
+        }
+    }
 }
 
 #[cfg(test)]
