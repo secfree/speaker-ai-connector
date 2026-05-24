@@ -10,8 +10,13 @@ struct SpeakerAIConnectorApp: App {
                 .environmentObject(coordinator)
         } label: {
             // SF Symbol picked from the status so the menu-bar glyph
-            // reflects the in-flight session at a glance.
-            Image(systemName: menuIcon(for: coordinator.status))
+            // reflects the in-flight session at a glance. Wrapped in
+            // `MenuBarLabel` so we have a long-lived SwiftUI view that
+            // can observe status transitions and auto-open the dialogue
+            // window for Bluetooth-driven sessions too (manual sessions
+            // open the window from MenuContent's Start button).
+            MenuBarLabel(iconName: menuIcon(for: coordinator.status))
+                .environmentObject(coordinator)
         }
         .menuBarExtraStyle(.menu)
 
@@ -26,9 +31,10 @@ struct SpeakerAIConnectorApp: App {
         }
         .windowResizability(.contentMinSize)
 
-        // v0.2 N2: live dialogue for manual sessions. Auto-opened from
-        // MenuContent's "Start session" button; not opened for Bluetooth
-        // sessions (those stay passive/screen-free per the v0.1 use case).
+        // v0.2 N2: live dialogue for the in-flight session. Manual
+        // sessions open it from MenuContent's Start button; Bluetooth
+        // sessions open it from `MenuBarLabel` when the status flips
+        // into a BT-in-flight variant.
         Window("Dialogue", id: "dialogue") {
             DialogueView()
                 .environmentObject(coordinator)
@@ -50,6 +56,38 @@ struct SpeakerAIConnectorApp: App {
     }
 }
 
+/// Always-rendered SwiftUI view sitting in the `MenuBarExtra` label slot.
+/// Renders the menu-bar glyph and — by piggy-backing on its persistent
+/// lifetime — auto-opens the Dialogue window whenever a Bluetooth-driven
+/// session starts (or is already in flight when the app launches).
+///
+/// Manual sessions open the window from `MenuContent`'s Start button, so
+/// this only fires for the BT path. Closing the window mid-session does
+/// *not* trigger a reopen — we only react to the in-flight transition.
+private struct MenuBarLabel: View {
+    let iconName: String
+    @EnvironmentObject var coordinator: Coordinator
+    @Environment(\.openWindow) private var openWindow
+    @State private var btInFlight: Bool = false
+
+    var body: some View {
+        Image(systemName: iconName)
+            .onAppear {
+                btInFlight = coordinator.status.bluetoothSessionInFlight
+                if btInFlight { presentDialogue() }
+            }
+            .onChange(of: coordinator.status.bluetoothSessionInFlight) { oldValue, newValue in
+                btInFlight = newValue
+                if newValue && !oldValue { presentDialogue() }
+            }
+    }
+
+    private func presentDialogue() {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: "dialogue")
+    }
+}
+
 struct MenuContent: View {
     @EnvironmentObject var coordinator: Coordinator
     @Environment(\.openSettings) private var openSettings
@@ -59,8 +97,8 @@ struct MenuContent: View {
         Text(coordinator.status.menuBarText)
         Divider()
         Button(startStopLabel) {
-            // Auto-open DialogueView when *starting* a manual session
-            // (per v0.2 N2). Bluetooth-driven sessions stay screen-free.
+            // Auto-open DialogueView when *starting* a manual session.
+            // The BT path opens it from `MenuBarLabel` instead.
             let isStarting = !coordinator.status.manualSessionInFlight
             if isStarting {
                 NSApp.activate(ignoringOtherApps: true)

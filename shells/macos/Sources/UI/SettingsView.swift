@@ -23,12 +23,19 @@ struct SettingsView: View {
                     }
                 }
                 .pickerStyle(.menu)
-                .disabled(coordinator.status.sessionInFlight)
+                // The picker stays enabled mid-session: the responder is
+                // captured at launch time (see Coordinator::do_launch), so
+                // changing it here only affects the *next* session.
                 Text(coordinator.responder == .nope
                      ? "Nope swallows input frames and never produces a reply. Sessions still record input clips so you can verify voice capture end to end without spending API credits."
                      : "Gemini Live streams audio over WebSocket and plays the response back through the speaker.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if coordinator.status.sessionInFlight {
+                    Text("A session is in flight — the change takes effect on the next session.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             // The API-key section is hidden entirely when Nope is selected

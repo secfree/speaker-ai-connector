@@ -440,6 +440,25 @@ impl Coordinator {
                         inner.revision += 1;
                         CmdAction::TearDown
                     }
+                    SessionState::Active {
+                        kind: SessionKind::Bluetooth,
+                        name,
+                    }
+                    | SessionState::Launching {
+                        kind: SessionKind::Bluetooth,
+                        name,
+                    } => {
+                        // The DialogueView's Stop button reaches here for
+                        // a BT-owned session. The speaker stays connected
+                        // — a fresh disconnect→reconnect cycle is what
+                        // launches the next session, so clear the
+                        // debounce timestamp so that cycle isn't dropped.
+                        let name = name.clone();
+                        inner.last_connect_at = None;
+                        inner.state = SessionState::TearingDown { name };
+                        inner.revision += 1;
+                        CmdAction::TearDown
+                    }
                     _ => return inner.status(),
                 },
             }

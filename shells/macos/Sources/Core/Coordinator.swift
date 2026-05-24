@@ -262,6 +262,10 @@ final class Coordinator: ObservableObject {
     /// state when the session ends.
     @Published private(set) var currentSessionId: String? = nil
     @Published private(set) var currentSessionStartUnix: UInt64? = nil
+    /// Trigger of the most recent session (per the `SessionStarted` event).
+    /// `"bluetooth"` or `"manual"`. Used by `DialogueView` to render the
+    /// right title since the BT and manual flows share the window.
+    @Published private(set) var currentSessionTrigger: String? = nil
 
     /// Mirrors of the persisted settings. Writing flushes through the
     /// FFI so the Rust side is the source of truth — these `@Published`
@@ -423,6 +427,20 @@ final class Coordinator: ObservableObject {
             pushCommand(stop: true)
         } else {
             startManualSession()
+        }
+    }
+
+    /// Tear down whatever session is currently in flight — manual *or*
+    /// BT-driven. Wired to `DialogueView`'s Stop button, which is shared
+    /// across both flows. No-op if nothing is in flight or a teardown
+    /// is already in progress.
+    func stopSession() {
+        switch status {
+        case .sessionLaunching, .sessionActive,
+             .manualSessionLaunching, .manualSessionActive:
+            pushCommand(stop: true)
+        default:
+            break
         }
     }
 
@@ -711,14 +729,17 @@ final class Coordinator: ObservableObject {
             // SessionStarted; clear when SessionEnded is the last event.
             var sessId: String? = nil
             var sessStart: UInt64? = nil
+            var sessTrigger: String? = nil
             for event in events {
                 switch event.kind {
-                case .sessionStarted(_, let id, let startUnix):
+                case .sessionStarted(let trigger, let id, let startUnix):
                     sessId = id
                     sessStart = startUnix
+                    sessTrigger = trigger
                 case .sessionEnded:
-                    // Keep the id/start so the window header still says
-                    // "Session ended at …" until the next session opens.
+                    // Keep the id/start/trigger so the window header
+                    // still says "<X> session — ended" until the next
+                    // session opens.
                     break
                 default:
                     break
@@ -726,6 +747,7 @@ final class Coordinator: ObservableObject {
             }
             currentSessionId = sessId
             currentSessionStartUnix = sessStart
+            currentSessionTrigger = sessTrigger
         } catch {
             log.error("decode status failed: \(error.localizedDescription, privacy: .public)")
         }

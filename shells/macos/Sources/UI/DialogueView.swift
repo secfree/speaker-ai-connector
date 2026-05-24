@@ -2,10 +2,12 @@ import SwiftUI
 import AVFoundation
 import AppKit
 
-/// Live transcript of clips for the active manual session. Opens
-/// automatically when the user starts a manual session from the menu
-/// bar and stays open afterwards so they can replay the clips. Pairs
-/// each `inputClipStarted` / `inputClipEnded` (and the matching output
+/// Live transcript of clips for the active session — manual *or*
+/// Bluetooth-driven. Opens automatically when a manual session is
+/// started from the menu bar, and when the configured speaker connects
+/// (or is already connected at app launch). Stays open after the
+/// session ends so the user can replay the clips. Pairs each
+/// `inputClipStarted` / `inputClipEnded` (and the matching output
 /// pair) into one playable row — the "ended" event carries the path.
 ///
 /// Reads off `Coordinator.dialogueEvents` (driven by the 500 ms status
@@ -61,12 +63,37 @@ struct DialogueView: View {
         switch coordinator.status {
         case .manualSessionActive: return "Manual session — live"
         case .manualSessionLaunching: return "Manual session — starting…"
-        case .tearingDown: return "Manual session — stopping…"
+        case .sessionActive(let name): return "\(name) — live"
+        case .sessionLaunching(let name): return "\(name) — starting…"
+        case .tearingDown(let name):
+            // `name == "manual"` is the marker set by the coordinator
+            // for a manual teardown; BT teardowns carry the speaker
+            // name. Prefer the recorded trigger when available since
+            // it's set on the actual SessionStarted event.
+            if coordinator.currentSessionTrigger == "bluetooth" {
+                return "\(name) — stopping…"
+            }
+            return "Manual session — stopping…"
         default:
             if coordinator.currentSessionId != nil {
-                return "Manual session — ended"
+                return coordinator.currentSessionTrigger == "bluetooth"
+                    ? "Speaker session — ended"
+                    : "Manual session — ended"
             }
             return "No active session"
+        }
+    }
+
+    /// True when there's a live session that the Stop button should be
+    /// able to end. Excludes `tearingDown` (already stopping) and
+    /// `error`/`idle`/etc.
+    private var canStopSession: Bool {
+        switch coordinator.status {
+        case .sessionLaunching, .sessionActive,
+             .manualSessionLaunching, .manualSessionActive:
+            return true
+        default:
+            return false
         }
     }
 
@@ -93,12 +120,12 @@ struct DialogueView: View {
             )
             Spacer()
             Button(role: .destructive) {
-                coordinator.toggleManualSession()
+                coordinator.stopSession()
             } label: {
                 Label("Stop session", systemImage: "stop.circle")
             }
-            .disabled(!coordinator.status.manualSessionInFlight)
-            .help(coordinator.status.manualSessionInFlight
+            .disabled(!canStopSession)
+            .help(canStopSession
                   ? "Stop the live session"
                   : "No active session to stop")
         }
@@ -124,11 +151,11 @@ struct DialogueView: View {
             Image(systemName: "ellipsis.bubble")
                 .font(.system(size: 36))
                 .foregroundStyle(.secondary)
-            if coordinator.status.manualSessionInFlight {
+            if coordinator.status.sessionInFlight {
                 Text("Speak — clips will appear here.")
                     .foregroundStyle(.secondary)
             } else {
-                Text("No clips yet. Start a manual session from the menu bar.")
+                Text("No clips yet. Start a manual session from the menu bar, or connect your speaker.")
                     .multilineTextAlignment(.center)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: 320)
