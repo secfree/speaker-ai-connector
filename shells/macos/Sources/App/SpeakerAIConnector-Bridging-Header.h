@@ -152,22 +152,26 @@ unsigned long long speaker_core_coord_revision(void);
 char *speaker_core_coord_simulate_connect(void);
 char *speaker_core_coord_simulate_disconnect(void);
 
-// --- Non-secret settings (M6) ---------------------------------------
+// --- Non-secret settings (M6 + v0.2 N3) -----------------------------
 // TOML at <data-dir>/config.toml. JSON shape:
 //   { "target_address": "aa:bb:..." | null,
 //     "model": "models/gemini-...",
 //     "vad_sensitivity": "Quality" | "LowBitrate" | "Aggressive" | "VeryAggressive",
 //     "silence_timeout_ms": 700,
-//     "force_default_output": false }
+//     "force_default_output": false,
+//     "responder": "Gemini" | "Nope" }
 char *speaker_core_settings_get(void);
 
 // All setters persist to TOML and refresh the coordinator's cached
 // snapshot. Return 0 on success, negative ConfigError code on failure
-// (-100 invalid input, -101 invalid sensitivity, -402 io, -403 toml).
+// (-100 invalid input, -101 invalid sensitivity / responder level,
+// -402 io, -403 toml).
 int speaker_core_settings_set_target(const char *address);   // NULL clears
 int speaker_core_settings_set_model(const char *model);
 int speaker_core_settings_set_vad_sensitivity(unsigned char level);
 int speaker_core_settings_set_silence_timeout_ms(unsigned int ms);
 int speaker_core_settings_set_force_default_output(int enabled);
+// Responder level: 0 = Gemini (default), 1 = Nope.
+int speaker_core_settings_set_responder(unsigned char level);
 
 #endif

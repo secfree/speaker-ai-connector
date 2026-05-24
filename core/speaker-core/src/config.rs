@@ -20,6 +20,8 @@ use directories::ProjectDirs;
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 
+pub use crate::responder::ResponderKind;
+
 const SERVICE: &str = "com.secfree.SpeakerAIConnector";
 const API_KEY_USER: &str = "gemini.api_key";
 const CONFIG_FILE: &str = "config.toml";
@@ -147,6 +149,10 @@ pub struct Settings {
     /// speaker before each session starts.
     #[serde(default)]
     pub force_default_output: bool,
+    /// Which responder handles input frames. `Gemini` ships a live model
+    /// reply; `Nope` swallows input frames and produces nothing. v0.2 N3.
+    #[serde(default)]
+    pub responder: ResponderKind,
 }
 
 fn default_model() -> String {
@@ -165,6 +171,7 @@ impl Default for Settings {
             vad_sensitivity: VadSensitivity::default(),
             silence_timeout_ms: default_silence_timeout_ms(),
             force_default_output: false,
+            responder: ResponderKind::default(),
         }
     }
 }
@@ -242,10 +249,28 @@ mod tests {
             vad_sensitivity: VadSensitivity::Aggressive,
             silence_timeout_ms: 900,
             force_default_output: true,
+            responder: ResponderKind::Nope,
         };
         let text = toml::to_string_pretty(&s).unwrap();
         let parsed: Settings = toml::from_str(&text).unwrap();
         assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn responder_defaults_to_gemini_for_older_configs() {
+        // Pre-N3 configs predate the field — `#[serde(default)]` keeps
+        // existing installs on the Gemini responder.
+        let parsed: Settings = toml::from_str(
+            r#"
+target_address = "aa:bb:cc:dd:ee:ff"
+model = "models/gemini-test"
+vad_sensitivity = "Quality"
+silence_timeout_ms = 700
+force_default_output = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.responder, ResponderKind::Gemini);
     }
 
     #[test]

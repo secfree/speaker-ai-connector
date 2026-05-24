@@ -16,32 +16,52 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Section("Gemini API key") {
-                // SecureField stays empty by design — the key lives in
-                // Keychain and we don't rehydrate the actual value into
-                // a Swift String (no need to widen the secret's blast
-                // radius). The status line below shows whether one is set.
-                SecureField("Paste API key", text: $apiKeyDraft)
-                    .textFieldStyle(.roundedBorder)
-                HStack {
-                    Button("Save") {
-                        if coordinator.saveApiKey(apiKeyDraft) {
-                            apiKeyDraft = ""
-                        }
+            Section("Responder") {
+                Picker("Responder", selection: $coordinator.responder) {
+                    ForEach(ResponderKind.allCases) { kind in
+                        Text(kind.label).tag(kind)
                     }
-                    .disabled(apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("Clear stored key") {
-                        coordinator.clearApiKey()
-                    }
-                    .disabled(!coordinator.apiKeyStored)
-                    Spacer()
-                    Text(coordinator.apiKeyStored ? "Stored in Keychain" : "No key set")
-                        .font(.caption)
-                        .foregroundStyle(coordinator.apiKeyStored ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
                 }
-                Text("Get a key from Google AI Studio. The app stores it in the macOS Keychain under com.secfree.SpeakerAIConnector — clear it anytime.")
+                .pickerStyle(.menu)
+                .disabled(coordinator.status.sessionInFlight)
+                Text(coordinator.responder == .nope
+                     ? "Nope swallows input frames and never produces a reply. Sessions still record input clips so you can verify voice capture end to end without spending API credits."
+                     : "Gemini Live streams audio over WebSocket and plays the response back through the speaker.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            // The API-key section is hidden entirely when Nope is selected
+            // (the key is not consulted, and showing a “no key set” warning
+            // for a key the user doesn't need is just noise).
+            if coordinator.responder == .gemini {
+                Section("Gemini API key") {
+                    // SecureField stays empty by design — the key lives in
+                    // Keychain and we don't rehydrate the actual value into
+                    // a Swift String (no need to widen the secret's blast
+                    // radius). The status line below shows whether one is set.
+                    SecureField("Paste API key", text: $apiKeyDraft)
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        Button("Save") {
+                            if coordinator.saveApiKey(apiKeyDraft) {
+                                apiKeyDraft = ""
+                            }
+                        }
+                        .disabled(apiKeyDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Clear stored key") {
+                            coordinator.clearApiKey()
+                        }
+                        .disabled(!coordinator.apiKeyStored)
+                        Spacer()
+                        Text(coordinator.apiKeyStored ? "Stored in Keychain" : "No key set")
+                            .font(.caption)
+                            .foregroundStyle(coordinator.apiKeyStored ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
+                    }
+                    Text("Get a key from Google AI Studio. The app stores it in the macOS Keychain under com.secfree.SpeakerAIConnector — clear it anytime.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Speaker") {
@@ -65,8 +85,11 @@ struct SettingsView: View {
                     Button("Test now") {
                         coordinator.runTestNow()
                     }
+                    // Nope doesn't need a key, so don't gate Test-now on
+                    // one in that mode (the session will record input
+                    // clips and produce nothing, which is the point).
                     .disabled(coordinator.targetAddress == nil
-                              || !coordinator.apiKeyStored
+                              || (coordinator.responder == .gemini && !coordinator.apiKeyStored)
                               || coordinator.status.sessionInFlight)
                 }
                 Text("Only currently-connected speakers and headphones are listed. Connect your speaker over Bluetooth, then pick it here — the choice is remembered and used automatically next time it connects.")

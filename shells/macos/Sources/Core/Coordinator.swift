@@ -94,6 +94,30 @@ enum VadSensitivity: UInt8, CaseIterable, Identifiable, Codable {
     }
 }
 
+/// Mirrors `speaker_core::responder::ResponderKind`. The TOML stores the
+/// variant name; the FFI setter takes a 0/1 level.
+enum ResponderKind: UInt8, CaseIterable, Identifiable, Codable {
+    case gemini = 0
+    case nope = 1
+
+    var id: UInt8 { rawValue }
+
+    var label: String {
+        switch self {
+        case .gemini: return "Gemini Live"
+        case .nope: return "Nope (no responder)"
+        }
+    }
+
+    init?(tomlVariant: String) {
+        switch tomlVariant {
+        case "Gemini": self = .gemini
+        case "Nope": self = .nope
+        default: return nil
+        }
+    }
+}
+
 /// Decoded shape of the JSON returned by `speaker_core_settings_get`.
 private struct SettingsPayload: Decodable {
     let targetAddress: String?
@@ -101,6 +125,7 @@ private struct SettingsPayload: Decodable {
     let vadSensitivity: String
     let silenceTimeoutMs: UInt32
     let forceDefaultOutput: Bool
+    let responder: String?
 
     enum CodingKeys: String, CodingKey {
         case targetAddress = "target_address"
@@ -108,6 +133,7 @@ private struct SettingsPayload: Decodable {
         case vadSensitivity = "vad_sensitivity"
         case silenceTimeoutMs = "silence_timeout_ms"
         case forceDefaultOutput = "force_default_output"
+        case responder
     }
 }
 
@@ -254,6 +280,10 @@ final class Coordinator: ObservableObject {
     @Published var model: String {
         didSet { if oldValue != model { persistModel() } }
     }
+    /// Which responder handles input frames (Gemini Live vs. Nope). v0.2 N3.
+    @Published var responder: ResponderKind {
+        didSet { if oldValue != responder { persistResponder() } }
+    }
 
     let watcher = BluetoothWatcher()
 
@@ -283,6 +313,7 @@ final class Coordinator: ObservableObject {
         self.forceDefaultOutput = false
         self.vadSensitivity = .quality
         self.model = ""
+        self.responder = .gemini
         apiKeyStored = (speaker_core_api_key_has() == 1)
         loadSettings()
         loginItemEnabled = LoginItem.isEnabled()
@@ -305,6 +336,9 @@ final class Coordinator: ObservableObject {
             self.model = p.model
             if let s = VadSensitivity(tomlVariant: p.vadSensitivity) {
                 self.vadSensitivity = s
+            }
+            if let raw = p.responder, let r = ResponderKind(tomlVariant: raw) {
+                self.responder = r
             }
             // Push the loaded target into the BT watcher so events get
             // filtered correctly from first launch.
@@ -344,6 +378,12 @@ final class Coordinator: ObservableObject {
         guard !model.isEmpty else { return }
         let rc = model.withCString { speaker_core_settings_set_model($0) }
         if rc != 0 { log.error("settings_set_model failed: \(rc)") }
+    }
+
+    private func persistResponder() {
+        guard !loadingSettings else { return }
+        let rc = speaker_core_settings_set_responder(responder.rawValue)
+        if rc != 0 { log.error("settings_set_responder failed: \(rc)") }
     }
 
     // --- API key (M5) -----------------------------------------------

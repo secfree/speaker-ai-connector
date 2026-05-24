@@ -35,6 +35,7 @@ use crate::audio;
 use crate::config::{self, Settings};
 use crate::gemini::GeminiError;
 use crate::last_error;
+use crate::responder::{ResponderInit, ResponderKind};
 #[cfg(target_os = "macos")]
 use crate::routing;
 use crate::sessions::{ClipEvent, SessionTrigger};
@@ -576,26 +577,38 @@ impl Coordinator {
                 }
             }
         }
-        let api_key = match config::get_api_key() {
-            Ok(Some(k)) => k,
-            Ok(None) => {
-                let e = GeminiError::NoApiKey;
-                last_error::set(&e);
-                self.fail_launch();
-                return;
+        // Responder is captured at launch time — a mid-session settings
+        // change doesn't disrupt the running session (it takes effect on
+        // the next start). Nope skips the API key fetch entirely so the
+        // "no key" failure mode only fires for the Gemini path.
+        let responder = match settings.responder {
+            ResponderKind::Gemini => {
+                let api_key = match config::get_api_key() {
+                    Ok(Some(k)) => k,
+                    Ok(None) => {
+                        let e = GeminiError::NoApiKey;
+                        last_error::set(&e);
+                        self.fail_launch();
+                        return;
+                    }
+                    Err(e) => {
+                        eprintln!("speaker-core: launch: api key read failed: {e:?}");
+                        self.fail_launch();
+                        return;
+                    }
+                };
+                ResponderInit::Gemini {
+                    api_key,
+                    model: settings.model.clone(),
+                }
             }
-            Err(e) => {
-                eprintln!("speaker-core: launch: api key read failed: {e:?}");
-                self.fail_launch();
-                return;
-            }
+            ResponderKind::Nope => ResponderInit::Nope,
         };
         let sensitivity =
             Sensitivity::from_level(settings.vad_sensitivity.as_level()).unwrap_or(Sensitivity::Quality);
         let trigger = kind.trigger();
         match audio::start_session(
-            api_key,
-            settings.model.clone(),
+            responder,
             sensitivity,
             trigger,
             target_address.clone(),

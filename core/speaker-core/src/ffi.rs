@@ -16,6 +16,7 @@ use crate::config::{self, Settings, VadSensitivity};
 use crate::coordinator::{BTEvent, Coordinator, SessionCommand};
 use crate::gemini::DEFAULT_MODEL;
 use crate::last_error;
+use crate::responder::{ResponderInit, ResponderKind};
 #[cfg(target_os = "macos")]
 use crate::routing;
 use crate::sessions::{SessionRecorder, SessionTrigger};
@@ -356,19 +357,31 @@ pub extern "C" fn speaker_core_manual_session_start(
             _ => DEFAULT_MODEL.to_string(),
         }
     };
-    let api_key = match config::get_api_key() {
-        Ok(Some(k)) => k,
-        Ok(None) => {
-            let e = crate::gemini::GeminiError::NoApiKey;
-            last_error::set(&e);
-            return e.code();
+    // Honour the persisted responder choice (v0.2 N3): Nope skips the
+    // Keychain lookup entirely so a kid-test session doesn't gate on a
+    // configured key.
+    let responder = match Settings::current().responder {
+        ResponderKind::Gemini => {
+            let api_key = match config::get_api_key() {
+                Ok(Some(k)) => k,
+                Ok(None) => {
+                    let e = crate::gemini::GeminiError::NoApiKey;
+                    last_error::set(&e);
+                    return e.code();
+                }
+                Err(e) => {
+                    eprintln!("speaker-core: manual session: api key read failed: {e:?}");
+                    return e.code();
+                }
+            };
+            ResponderInit::Gemini {
+                api_key,
+                model: model_str,
+            }
         }
-        Err(e) => {
-            eprintln!("speaker-core: manual session: api key read failed: {e:?}");
-            return e.code();
-        }
+        ResponderKind::Nope => ResponderInit::Nope,
     };
-    match audio::start_manual_session(api_key, model_str, s) {
+    match audio::start_manual_session(responder, s) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("speaker-core: manual session start failed: {e:?}");
@@ -606,6 +619,24 @@ pub extern "C" fn speaker_core_settings_set_vad_sensitivity(level: u8) -> i32 {
 #[no_mangle]
 pub extern "C" fn speaker_core_settings_set_silence_timeout_ms(ms: u32) -> i32 {
     match Settings::update(|s| s.silence_timeout_ms = ms) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// `level` is 0 (Gemini) or 1 (Nope). Persisted to TOML. Returns 0 on
+/// success, `-101` for an out-of-range level, otherwise a negative
+/// `ConfigError::code()`. v0.2 N3.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_responder(level: u8) -> i32 {
+    let r = match ResponderKind::from_level(level) {
+        Some(r) => r,
+        None => return -101,
+    };
+    match Settings::update(|s| s.responder = r) {
         Ok(_) => {
             Coordinator::instance().refresh_settings();
             0

@@ -104,7 +104,9 @@ struct MenuContent: View {
     private var startStopEnabled: Bool {
         if coordinator.status.bluetoothSessionInFlight { return false }
         if coordinator.status.manualSessionInFlight { return true }
-        // Need a stored API key for Gemini Live to handshake.
+        // Need a stored API key for Gemini Live to handshake. Nope doesn't
+        // talk to a server, so it can start without one.
+        if coordinator.responder == .nope { return true }
         return coordinator.apiKeyStored
     }
 }

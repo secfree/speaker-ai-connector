@@ -17,9 +17,10 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, SampleRate, Stream, StreamConfig};
 
 use crate::gemini::{
-    EventSink, GeminiError, GeminiEvent, GeminiSession, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE,
+    EventSink, GeminiError, GeminiEvent, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE,
 };
 use crate::last_error;
+use crate::responder::{ResponderInit, ResponderSession};
 use crate::sessions::{ClipDirection, ClipEvent, SessionRecorder, SessionTrigger};
 use crate::vad::{Sensitivity, VadRelay};
 
@@ -431,7 +432,7 @@ pub fn stop_vad_diagnostic() {
 struct SessionHandle {
     _input: Stream,
     _output: Stream,
-    _gemini: GeminiSession,
+    _responder: ResponderSession,
 }
 
 unsafe impl Send for SessionHandle {}
@@ -507,20 +508,19 @@ const PLAYBACK_QUEUE_CAP_SAMPLES: usize = 24_000 * 5;
 /// stays stable). Manual sessions have no target address and use the
 /// `Manual` trigger so the manifest reads `"trigger": "manual"`.
 pub fn start_manual_session(
-    api_key: String,
-    model: String,
+    responder: ResponderInit,
     sensitivity: Sensitivity,
 ) -> Result<(), AudioError> {
-    start_session(api_key, model, sensitivity, SessionTrigger::Manual, None)
+    start_session(responder, sensitivity, SessionTrigger::Manual, None)
 }
 
 pub fn start_session(
-    api_key: String,
-    model: String,
+    responder: ResponderInit,
     sensitivity: Sensitivity,
     trigger: SessionTrigger,
     target_address: Option<String>,
 ) -> Result<(), AudioError> {
+    let responder_kind = responder.kind();
     let mut guard = session_slot().lock().unwrap();
     if guard.is_some() {
         return Err(AudioError::AlreadyRunning);
@@ -547,8 +547,8 @@ pub fn start_session(
     let output_rate = output_cfg.sample_rate().0;
     let output_channels = output_cfg.channels() as usize;
     eprintln!(
-        "speaker-core: session({:?}) input {}Hz/{}ch → relay {}Hz/1ch ({:?}); output queue {}Hz/1ch → {}Hz/{}ch",
-        trigger, input_rate, input_channels, INPUT_SAMPLE_RATE, sensitivity, OUTPUT_SAMPLE_RATE, output_rate, output_channels
+        "speaker-core: session({:?}, responder={:?}) input {}Hz/{}ch → relay {}Hz/1ch ({:?}); output queue {}Hz/1ch → {}Hz/{}ch",
+        trigger, responder_kind, input_rate, input_channels, INPUT_SAMPLE_RATE, sensitivity, OUTPUT_SAMPLE_RATE, output_rate, output_channels
     );
 
     // Open the on-disk session before connecting Gemini — if the recorder
@@ -646,7 +646,7 @@ pub fn start_session(
         }
     });
 
-    let gemini = GeminiSession::start(api_key, model, sink).map_err(|e| {
+    let responder_session = ResponderSession::start(responder, sink).map_err(|e| {
         // Roll back the session on the disk so the next attempt isn't
         // blocked with AlreadyActive — same pattern as the VAD diagnostic.
         let _ = recorder.end_session();
@@ -714,9 +714,11 @@ pub fn start_session(
     let mut in_frac: f64 = 1.0;
     let mut mono_residue: VecDeque<f32> = VecDeque::with_capacity(input_rate as usize / 10);
 
-    // GeminiSession is `Send`; move a handle into the input callback so
-    // we can forward gated frames to the upload task.
-    let upload_handle = gemini.upload_handle();
+    // ResponderSession is `Send`; move a handle into the input callback
+    // so we can forward gated frames to the upload task. The Nope variant
+    // drops frames on the floor — input clips still record to disk via
+    // the recorder below.
+    let upload_handle = responder_session.upload_handle();
     let dead_for_input = session_dead.clone();
     // Latches on first SendError so we log "upload channel closed" once
     // per session, not once per cpal buffer (~100 times/sec).
@@ -825,7 +827,7 @@ pub fn start_session(
     *guard = Some(SessionHandle {
         _input: input_stream,
         _output: output_stream,
-        _gemini: gemini,
+        _responder: responder_session,
     });
     // Tell the coordinator (and through it the shell) that a brand-new
     // session is live. Drop the guard first so the callback can't
