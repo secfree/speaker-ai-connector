@@ -10,9 +10,9 @@
 //! work for the smoke test. A real resampler lives in M4.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleFormat, SampleRate, Stream, StreamConfig, SupportedStreamConfig};
@@ -751,6 +751,19 @@ fn resolve_default_output(host: &Host) -> Result<(Device, SupportedStreamConfig)
 /// 24 kHz mono i16 = 240 kB — well under any reasonable response burst.
 const PLAYBACK_QUEUE_CAP_SAMPLES: usize = 24_000 * 5;
 
+/// Hold-off after the model's last sample has nominally finished playing
+/// before the input path is allowed to run VAD again. Covers the output
+/// device's buffer drain and the acoustic round-trip back into the HFP
+/// mic. Without it the mic loopback fires Silero, queues a spurious
+/// `activityStart`, and Gemini's manual-activity state machine kicks the
+/// connection with `Precondition check failed` (WS 1007).
+///
+/// 600 ms is comfortably longer than a typical CoreAudio output buffer
+/// (≤200 ms) plus a Bluetooth HFP path's worst-case latency (~300 ms);
+/// the cost is missing a barge-in for that window, which the design
+/// already accepts since HFP has no AEC.
+const ECHO_GUARD_TAIL_NS: u64 = 600_000_000;
+
 /// Convenience wrapper for the manual path (kept so the FFI surface
 /// stays stable). Manual sessions have no target address and use the
 /// `Manual` trigger so the manifest reads `"trigger": "manual"`.
@@ -817,8 +830,18 @@ pub fn start_session(
     // mid-burst stream of AudioChunks knows to skip begin_clip.
     let out_clip_open = Arc::new(AtomicBool::new(false));
 
+    // Echo-guard play-out clock. Monotonic ns since `session_start`;
+    // marks when all queued model audio will have nominally finished
+    // playing. The input callback adds `ECHO_GUARD_TAIL_NS` to this and
+    // refuses to feed the VAD until the deadline passes — that's how we
+    // stop the HFP mic loopback from forging a user turn over the
+    // model's own voice.
+    let session_start = Instant::now();
+    let play_out_until_ns = Arc::new(AtomicU64::new(0));
+
     let queue_for_sink = playback_queue.clone();
     let out_clip_for_sink = out_clip_open.clone();
+    let play_out_for_sink = play_out_until_ns.clone();
     // Flipped on Error/Closed. The input callback checks this to stop
     // hammering the dead upload channel, and we use it to gate the
     // one-shot teardown thread so we only spawn it once per session.
@@ -850,6 +873,18 @@ pub fn start_session(
                         eprintln!("speaker-core: gemini write_frames(Out) failed: {e:?}");
                     }
                 }
+                // Advance the play-out clock by this chunk's nominal
+                // duration. `max(prev, now)` resumes from "now" after an
+                // idle stretch and resumes from `prev` while a burst is
+                // back-to-back — the chunk after this one will play out
+                // when this one finishes, not when it arrived.
+                let chunk_ns =
+                    (samples.len() as u64) * 1_000_000_000 / OUTPUT_SAMPLE_RATE as u64;
+                let now_ns = session_start.elapsed().as_nanos() as u64;
+                let prev = play_out_for_sink.load(Ordering::SeqCst);
+                let new_until = std::cmp::max(prev, now_ns).saturating_add(chunk_ns);
+                play_out_for_sink.store(new_until, Ordering::SeqCst);
+
                 let mut q = queue_for_sink.lock().unwrap();
                 let overflow = (q.len() + samples.len()).saturating_sub(PLAYBACK_QUEUE_CAP_SAMPLES);
                 if overflow > 0 {
@@ -879,6 +914,12 @@ pub fn start_session(
                 if matches!(event, GeminiEvent::Interrupted) {
                     // Drop unplayed audio so we don't talk over the user.
                     queue_for_sink.lock().unwrap().clear();
+                    // We just threw away the rest of the burst, so the
+                    // play-out clock's projection is stale — rewind it to
+                    // "now" so the echo guard lifts after just the tail
+                    // and the user can be heard again.
+                    let now_ns = session_start.elapsed().as_nanos() as u64;
+                    play_out_for_sink.store(now_ns, Ordering::SeqCst);
                 }
             }
             GeminiEvent::Error(e) => {
@@ -964,9 +1005,14 @@ pub fn start_session(
     // the recorder below.
     let upload_handle = responder_session.upload_handle();
     let dead_for_input = session_dead.clone();
+    let out_clip_for_input = out_clip_open.clone();
+    let play_out_for_input = play_out_until_ns.clone();
     // Latches on first SendError so we log "upload channel closed" once
     // per session, not once per cpal buffer (~100 times/sec).
     let upload_log_armed = Arc::new(AtomicBool::new(true));
+    // Latches to log echo-guard suppression once per burst rather than
+    // once per cpal buffer.
+    let echo_guard_log_armed = Arc::new(AtomicBool::new(true));
     let input_stream = input_device
         .build_input_stream(
             &in_stream_cfg,
@@ -977,6 +1023,25 @@ pub fn start_session(
                 if dead_for_input.load(Ordering::SeqCst) {
                     return;
                 }
+                // Echo guard: while the model is bursting *or* its tail is
+                // still playing out of the speaker, the HFP mic loops the
+                // playback back to us. Feeding that to Silero produces a
+                // false `Opened`, queues a stray `activityStart`, and the
+                // server kicks the WS with `Precondition check failed`.
+                let now_ns = session_start.elapsed().as_nanos() as u64;
+                let play_out = play_out_for_input.load(Ordering::SeqCst);
+                let tail_active = play_out > 0
+                    && now_ns < play_out.saturating_add(ECHO_GUARD_TAIL_NS);
+                if out_clip_for_input.load(Ordering::SeqCst) || tail_active {
+                    if echo_guard_log_armed
+                        .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                        .is_ok()
+                    {
+                        eprintln!("speaker-core: echo guard armed — input suppressed during model burst + tail");
+                    }
+                    return;
+                }
+                echo_guard_log_armed.store(true, Ordering::SeqCst);
                 let inv = 1.0 / input_channels as f32;
                 for frame in data.chunks_exact(input_channels) {
                     let sum: f32 = frame.iter().sum();

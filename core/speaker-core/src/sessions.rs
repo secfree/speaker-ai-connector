@@ -221,7 +221,23 @@ struct ActiveSession {
     responder: ResponderKind,
     next_seq: u32,
     clips: Vec<ClipMeta>,
-    active_clip: Option<ActiveClip>,
+    /// Active In and Out clips track separately so a model burst (Out)
+    /// and a VAD-gated user turn (In) can be open simultaneously. The
+    /// older single-slot design conflated them: `begin_clip(In)` while
+    /// Out was active returned `ActiveClipExists`, and `write_frames(In)`
+    /// returned `NoActiveClip` on the direction mismatch — masking real
+    /// state inside the audio path.
+    active_in: Option<ActiveClip>,
+    active_out: Option<ActiveClip>,
+}
+
+impl ActiveSession {
+    fn active_slot_mut(&mut self, direction: ClipDirection) -> &mut Option<ActiveClip> {
+        match direction {
+            ClipDirection::In => &mut self.active_in,
+            ClipDirection::Out => &mut self.active_out,
+        }
+    }
 }
 
 pub struct SessionRecorder {
@@ -278,7 +294,8 @@ impl SessionRecorder {
             responder,
             next_seq: 1,
             clips: Vec::new(),
-            active_clip: None,
+            active_in: None,
+            active_out: None,
         });
         Ok(id)
     }
@@ -290,10 +307,11 @@ impl SessionRecorder {
     ) -> Result<ClipBegin, SessionError> {
         let mut guard = self.state.lock().unwrap();
         let sess = guard.as_mut().ok_or(SessionError::NoActiveSession)?;
-        if sess.active_clip.is_some() {
+        if sess.active_slot_mut(direction).is_some() {
             return Err(SessionError::ActiveClipExists);
         }
         let seq = sess.next_seq;
+        sess.next_seq += 1;
         let file_name = format!("{:04}-{}.wav", seq, direction.tag());
         let path = sess.dir.join(&file_name);
         let spec = WavSpec {
@@ -305,7 +323,7 @@ impl SessionRecorder {
         let writer =
             WavWriter::create(&path, spec).map_err(|e| SessionError::Wav(e.to_string()))?;
         let offset = sess.start.elapsed().as_secs_f64();
-        sess.active_clip = Some(ActiveClip {
+        *sess.active_slot_mut(direction) = Some(ActiveClip {
             seq,
             direction,
             offset_secs: offset,
@@ -327,14 +345,10 @@ impl SessionRecorder {
     ) -> Result<(), SessionError> {
         let mut guard = self.state.lock().unwrap();
         let sess = guard.as_mut().ok_or(SessionError::NoActiveSession)?;
-        let clip = sess.active_clip.as_mut().ok_or(SessionError::NoActiveClip)?;
-        if clip.direction != direction {
-            // Mismatched direction is treated the same as "no active clip
-            // for this direction" — defensive, since the audio path and
-            // the Gemini path call begin/end against opposite directions
-            // and shouldn't ever interleave write_frames calls.
-            return Err(SessionError::NoActiveClip);
-        }
+        let clip = sess
+            .active_slot_mut(direction)
+            .as_mut()
+            .ok_or(SessionError::NoActiveClip)?;
         for &s in samples {
             clip.writer
                 .write_sample(s)
@@ -347,20 +361,23 @@ impl SessionRecorder {
     pub fn end_clip(&self, direction: ClipDirection) -> Result<ClipEnd, SessionError> {
         let mut guard = self.state.lock().unwrap();
         let sess = guard.as_mut().ok_or(SessionError::NoActiveSession)?;
-        let clip = sess.active_clip.take().ok_or(SessionError::NoActiveClip)?;
-        if clip.direction != direction {
-            return Err(SessionError::NoActiveClip);
-        }
+        let clip = sess
+            .active_slot_mut(direction)
+            .take()
+            .ok_or(SessionError::NoActiveClip)?;
         finalize_clip(sess, clip)
     }
 
     pub fn end_session(&self) -> Result<(), SessionError> {
         let mut guard = self.state.lock().unwrap();
         let mut sess = guard.take().ok_or(SessionError::NoActiveSession)?;
-        if let Some(clip) = sess.active_clip.take() {
-            // Best-effort finalise — a session that ends with the gate
-            // still open (e.g. shutdown mid-utterance) should still
-            // produce a playable clip.
+        // Best-effort finalise — a session that ends with either gate
+        // still open (e.g. shutdown mid-utterance, model burst cut short)
+        // should still produce playable clips.
+        if let Some(clip) = sess.active_in.take() {
+            let _ = finalize_clip(&mut sess, clip);
+        }
+        if let Some(clip) = sess.active_out.take() {
             let _ = finalize_clip(&mut sess, clip);
         }
         let end_unix = unix_now();
@@ -505,7 +522,7 @@ fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<ClipEnd, 
         file: file_name,
         sample_rate,
     });
-    sess.next_seq += 1;
+    // next_seq is bumped at begin_clip; finalise just commits the metadata.
     Ok(ClipEnd {
         seq,
         direction,
@@ -694,6 +711,42 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, SessionError::AlreadyActive));
         rec.end_session().unwrap();
+        cleanup(&root);
+    }
+
+    #[test]
+    fn in_and_out_clips_can_be_active_simultaneously() {
+        // Regression for the echo-loop bug: while a model burst's Out
+        // clip is open, the audio path used to be blocked from opening
+        // an In clip (`ActiveClipExists`), and any `write_frames(In)`
+        // returned `NoActiveClip` on the direction mismatch. The two
+        // directions now track independently.
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let id = rec
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
+            .unwrap();
+
+        // Out opens first (model bursts before user speaks again).
+        let out_begin = rec.begin_clip(ClipDirection::Out, 24_000).unwrap();
+        // In opens while Out is still active — must succeed.
+        let in_begin = rec.begin_clip(ClipDirection::In, 16_000).unwrap();
+        assert_ne!(out_begin.seq, in_begin.seq, "concurrent clips need distinct seqs");
+
+        // Writes against each direction land in their own clip.
+        rec.write_frames(ClipDirection::Out, &vec![0i16; 24_000]).unwrap();
+        rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
+
+        // End them in either order.
+        rec.end_clip(ClipDirection::Out).unwrap();
+        rec.end_clip(ClipDirection::In).unwrap();
+        rec.end_session().unwrap();
+
+        let clips = rec.list_clips(&id).unwrap();
+        assert_eq!(clips.len(), 2);
+        let dirs: Vec<_> = clips.iter().map(|c| c.direction).collect();
+        assert!(dirs.contains(&ClipDirection::In));
+        assert!(dirs.contains(&ClipDirection::Out));
         cleanup(&root);
     }
 
