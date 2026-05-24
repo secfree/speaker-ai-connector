@@ -20,7 +20,7 @@ use crate::responder::{ResponderInit, ResponderKind};
 #[cfg(target_os = "macos")]
 use crate::routing;
 use crate::sessions::{SessionRecorder, SessionTrigger};
-use crate::vad::Sensitivity;
+use crate::vad::{VadEngineKind, WebRtcSensitivity};
 
 #[no_mangle]
 pub extern "C" fn speaker_core_version() -> *const c_char {
@@ -55,7 +55,7 @@ pub extern "C" fn speaker_core_audio_loopback_stop() {
 /// `SessionError::code()` if the session can't be opened on disk.
 #[no_mangle]
 pub extern "C" fn speaker_core_vad_diagnostic_start(sensitivity: u8) -> i32 {
-    let s = match Sensitivity::from_level(sensitivity) {
+    let s = match WebRtcSensitivity::from_level(sensitivity) {
         Some(s) => s,
         None => return -101,
     };
@@ -345,7 +345,7 @@ pub extern "C" fn speaker_core_manual_session_start(
     sensitivity: u8,
     model: *const c_char,
 ) -> i32 {
-    let s = match Sensitivity::from_level(sensitivity) {
+    let s = match WebRtcSensitivity::from_level(sensitivity) {
         Some(s) => s,
         None => return -101,
     };
@@ -608,6 +608,67 @@ pub extern "C" fn speaker_core_settings_set_vad_sensitivity(level: u8) -> i32 {
         None => return -101,
     };
     match Settings::update(|s| s.vad_sensitivity = v) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Select the VAD engine. `level` is 0 (WebRTC) or 1 (Silero, v0.3 N2).
+/// Persisted to TOML. Returns 0 on success, `-101` for an out-of-range
+/// level, otherwise a negative `ConfigError::code()`. v0.3 N1.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_vad_engine(level: u8) -> i32 {
+    let kind = match VadEngineKind::from_level(level) {
+        Some(k) => k,
+        None => return -101,
+    };
+    match Settings::update(|s| s.vad_engine = kind) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Set the active engine's tuning value. Semantics depend on the
+/// currently-persisted `vad_engine`:
+///   - WebRTC: `value` is `0..=3` (Quality → VeryAggressive), written
+///     to `vad_sensitivity`. Larger values are rejected.
+///   - Silero: `value` is `0..=1000` (fixed-point of 0.0..=1.0), written
+///     to `silero_threshold`. Larger values are rejected.
+///
+/// One setter per concept (not per engine) so the Swift side doesn't
+/// grow `if engine == X` branches — it just hands the slider/picker
+/// value through unchanged. Returns 0 on success, `-101` for an
+/// out-of-range value, otherwise a negative `ConfigError::code()`.
+/// v0.3 N1.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_vad_threshold(value: u16) -> i32 {
+    let current = Settings::current();
+    let updated = match current.vad_engine {
+        VadEngineKind::WebRtc => {
+            let level = match u8::try_from(value) {
+                Ok(l) => l,
+                Err(_) => return -101,
+            };
+            let v = match VadSensitivity::from_level(level) {
+                Some(v) => v,
+                None => return -101,
+            };
+            Settings::update(|s| s.vad_sensitivity = v)
+        }
+        VadEngineKind::Silero => {
+            if value > 1000 {
+                return -101;
+            }
+            Settings::update(|s| s.silero_threshold = value)
+        }
+    };
+    match updated {
         Ok(_) => {
             Coordinator::instance().refresh_settings();
             0

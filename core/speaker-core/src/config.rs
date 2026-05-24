@@ -21,6 +21,7 @@ use keyring::Entry;
 use serde::{Deserialize, Serialize};
 
 pub use crate::responder::ResponderKind;
+pub use crate::vad::VadEngineKind;
 
 const SERVICE: &str = "com.secfree.SpeakerAIConnector";
 const API_KEY_USER: &str = "gemini.api_key";
@@ -138,8 +139,18 @@ pub struct Settings {
     /// Gemini Live model id. Defaults to the constant in `gemini.rs`.
     #[serde(default = "default_model")]
     pub model: String,
+    /// Which VAD engine the audio path constructs. v0.3 N1 introduced
+    /// the seam; the WebRTC default keeps older configs unchanged until
+    /// the user opts in to Silero from Settings.
+    #[serde(default)]
+    pub vad_engine: VadEngineKind,
     #[serde(default)]
     pub vad_sensitivity: VadSensitivity,
+    /// Silero VAD probability threshold, encoded as 0..=1000 → 0.0..=1.0.
+    /// Default 500 (0.5) — the value Silero's upstream README
+    /// recommends. Only consulted when `vad_engine == Silero`.
+    #[serde(default = "default_silero_threshold")]
+    pub silero_threshold: u16,
     /// Hangover before the VAD gate closes, in milliseconds. Default
     /// matches the constant the audio path used before M6 (~700 ms);
     /// surfaced as a setting so M7 tuning can land without a code change.
@@ -163,12 +174,18 @@ fn default_silence_timeout_ms() -> u32 {
     700
 }
 
+fn default_silero_threshold() -> u16 {
+    500
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             target_address: None,
             model: default_model(),
+            vad_engine: VadEngineKind::default(),
             vad_sensitivity: VadSensitivity::default(),
+            silero_threshold: default_silero_threshold(),
             silence_timeout_ms: default_silence_timeout_ms(),
             force_default_output: false,
             responder: ResponderKind::default(),
@@ -246,7 +263,9 @@ mod tests {
         let s = Settings {
             target_address: Some("aa:bb:cc:dd:ee:ff".into()),
             model: "models/gemini-test".into(),
+            vad_engine: VadEngineKind::Silero,
             vad_sensitivity: VadSensitivity::Aggressive,
+            silero_threshold: 650,
             silence_timeout_ms: 900,
             force_default_output: true,
             responder: ResponderKind::Nope,
@@ -279,6 +298,25 @@ force_default_output = false
         // means we get sensible defaults rather than a parse error.
         let parsed: Settings = toml::from_str("").unwrap();
         assert_eq!(parsed, Settings::default());
+    }
+
+    #[test]
+    fn vad_engine_defaults_to_webrtc_for_older_configs() {
+        // Pre-N1 configs predate the field — `#[serde(default)]` keeps
+        // existing installs on the WebRTC engine so an upgrade doesn't
+        // silently switch the audio path under the user.
+        let parsed: Settings = toml::from_str(
+            r#"
+target_address = "aa:bb:cc:dd:ee:ff"
+model = "models/gemini-test"
+vad_sensitivity = "Quality"
+silence_timeout_ms = 700
+force_default_output = false
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.vad_engine, VadEngineKind::WebRtc);
+        assert_eq!(parsed.silero_threshold, 500);
     }
 
     #[test]

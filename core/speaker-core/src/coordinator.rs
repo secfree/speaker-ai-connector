@@ -39,7 +39,7 @@ use crate::responder::{ResponderInit, ResponderKind};
 #[cfg(target_os = "macos")]
 use crate::routing;
 use crate::sessions::{ClipEvent, SessionTrigger};
-use crate::vad::Sensitivity;
+use crate::vad::WebRtcSensitivity;
 
 /// Default debounce window for repeated BT connect events. Long enough
 /// to absorb a brief speaker reset, short enough that a real
@@ -624,7 +624,8 @@ impl Coordinator {
             ResponderKind::Nope => ResponderInit::Nope,
         };
         let sensitivity =
-            Sensitivity::from_level(settings.vad_sensitivity.as_level()).unwrap_or(Sensitivity::Quality);
+            WebRtcSensitivity::from_level(settings.vad_sensitivity.as_level())
+                .unwrap_or(WebRtcSensitivity::Quality);
         let trigger = kind.trigger();
         match audio::start_session(
             responder,

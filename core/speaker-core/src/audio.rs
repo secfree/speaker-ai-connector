@@ -22,7 +22,7 @@ use crate::gemini::{
 use crate::last_error;
 use crate::responder::{ResponderInit, ResponderSession};
 use crate::sessions::{ClipDirection, ClipEvent, SessionRecorder, SessionTrigger};
-use crate::vad::{Sensitivity, VadRelay};
+use crate::vad::{VadRelay, WebRtcSensitivity};
 
 #[derive(Debug)]
 pub enum AudioError {
@@ -248,7 +248,7 @@ fn vad_slot() -> &'static Mutex<Option<VadHandle>> {
     SLOT.get_or_init(|| Mutex::new(None))
 }
 
-pub fn start_vad_diagnostic(sensitivity: Sensitivity) -> Result<(), AudioError> {
+pub fn start_vad_diagnostic(sensitivity: WebRtcSensitivity) -> Result<(), AudioError> {
     let mut guard = vad_slot().lock().unwrap();
     if guard.is_some() {
         return Err(AudioError::AlreadyRunning);
@@ -276,7 +276,7 @@ pub fn start_vad_diagnostic(sensitivity: Sensitivity) -> Result<(), AudioError> 
         buffer_size: cpal::BufferSize::Default,
     };
 
-    let relay = VadRelay::new(
+    let relay = VadRelay::new_webrtc(
         VAD_SAMPLE_RATE,
         VAD_FRAME_MS,
         sensitivity,
@@ -509,14 +509,14 @@ const PLAYBACK_QUEUE_CAP_SAMPLES: usize = 24_000 * 5;
 /// `Manual` trigger so the manifest reads `"trigger": "manual"`.
 pub fn start_manual_session(
     responder: ResponderInit,
-    sensitivity: Sensitivity,
+    sensitivity: WebRtcSensitivity,
 ) -> Result<(), AudioError> {
     start_session(responder, sensitivity, SessionTrigger::Manual, None)
 }
 
 pub fn start_session(
     responder: ResponderInit,
-    sensitivity: Sensitivity,
+    sensitivity: WebRtcSensitivity,
     trigger: SessionTrigger,
     target_address: Option<String>,
 ) -> Result<(), AudioError> {
@@ -698,7 +698,7 @@ pub fn start_session(
         sample_rate: SampleRate(input_rate),
         buffer_size: cpal::BufferSize::Default,
     };
-    let relay = VadRelay::new(
+    let relay = VadRelay::new_webrtc(
         INPUT_SAMPLE_RATE,
         VAD_FRAME_MS,
         sensitivity,
