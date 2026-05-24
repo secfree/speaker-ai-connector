@@ -427,8 +427,12 @@ pub extern "C" fn speaker_core_last_session_error_clear() {
 // status synchronously; the shell can also poll `_status` on a timer for
 // async transitions (Launching → Active / Error).
 
-fn status_json_or_null(s: crate::coordinator::StatusEvent) -> *mut c_char {
-    match serde_json::to_string(&s) {
+fn status_json_or_null(_s: crate::coordinator::StatusEvent) -> *mut c_char {
+    // Always return the full snapshot — the StatusEvent variant is still
+    // at the root (flattened) so shells that only decode `variant`/`name`/
+    // `message` keep working, but the dialogue window needs the rest.
+    let snap = Coordinator::instance().status_snapshot();
+    match serde_json::to_string(&snap) {
         Ok(json) => into_c_string(json),
         Err(e) => {
             eprintln!("speaker-core: status serialize failed: {e:?}");

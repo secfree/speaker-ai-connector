@@ -117,6 +117,59 @@ pub struct ClipMeta {
     pub file: String,
 }
 
+/// Returned by `begin_clip` — the live `DialogueView` needs the seq +
+/// offset the moment the clip opens, not after it finalises.
+#[derive(Debug, Clone)]
+pub struct ClipBegin {
+    pub seq: u32,
+    pub offset_secs: f64,
+}
+
+/// Returned by `end_clip` — same shape as `ClipMeta` plus the absolute
+/// path so the shell can hand it straight to `AVAudioPlayer`.
+#[derive(Debug, Clone)]
+pub struct ClipEnd {
+    pub seq: u32,
+    pub direction: ClipDirection,
+    pub offset_secs: f64,
+    pub duration_secs: f64,
+    pub path: PathBuf,
+}
+
+/// Per-session activity surfaced to the shell via the coordinator's
+/// status snapshot. Variants carry just the values the `DialogueView`
+/// needs — no raw PCM, no opaque handles. Durations / offsets are
+/// already rounded to milliseconds so the JSON stays compact and the
+/// Swift side doesn't have to format float seconds.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClipEvent {
+    SessionStarted {
+        trigger: SessionTrigger,
+        id: String,
+        start_unix_secs: u64,
+    },
+    SessionEnded,
+    InputClipStarted {
+        seq: u32,
+        offset_ms: u64,
+    },
+    InputClipEnded {
+        seq: u32,
+        duration_ms: u64,
+        path: String,
+    },
+    OutputClipStarted {
+        seq: u32,
+        offset_ms: u64,
+    },
+    OutputClipEnded {
+        seq: u32,
+        duration_ms: u64,
+        path: String,
+    },
+}
+
 #[derive(Serialize, Deserialize)]
 struct Manifest {
     version: u32,
@@ -210,7 +263,7 @@ impl SessionRecorder {
         Ok(id)
     }
 
-    pub fn begin_clip(&self, direction: ClipDirection) -> Result<(), SessionError> {
+    pub fn begin_clip(&self, direction: ClipDirection) -> Result<ClipBegin, SessionError> {
         let mut guard = self.state.lock().unwrap();
         let sess = guard.as_mut().ok_or(SessionError::NoActiveSession)?;
         if sess.active_clip.is_some() {
@@ -236,7 +289,10 @@ impl SessionRecorder {
             writer,
             file_name,
         });
-        Ok(())
+        Ok(ClipBegin {
+            seq,
+            offset_secs: offset,
+        })
     }
 
     pub fn write_frames(
@@ -262,7 +318,7 @@ impl SessionRecorder {
         Ok(())
     }
 
-    pub fn end_clip(&self, direction: ClipDirection) -> Result<(), SessionError> {
+    pub fn end_clip(&self, direction: ClipDirection) -> Result<ClipEnd, SessionError> {
         let mut guard = self.state.lock().unwrap();
         let sess = guard.as_mut().ok_or(SessionError::NoActiveSession)?;
         let clip = sess.active_clip.take().ok_or(SessionError::NoActiveClip)?;
@@ -390,7 +446,7 @@ impl SessionRecorder {
     }
 }
 
-fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<(), SessionError> {
+fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<ClipEnd, SessionError> {
     let duration = clip.started.elapsed().as_secs_f64();
     let ActiveClip {
         seq,
@@ -403,6 +459,7 @@ fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<(), Sessi
     writer
         .finalize()
         .map_err(|e| SessionError::Wav(e.to_string()))?;
+    let path = sess.dir.join(&file_name);
     sess.clips.push(ClipMeta {
         seq,
         direction,
@@ -411,7 +468,13 @@ fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<(), Sessi
         file: file_name,
     });
     sess.next_seq += 1;
-    Ok(())
+    Ok(ClipEnd {
+        seq,
+        direction,
+        offset_secs,
+        duration_secs: duration,
+        path,
+    })
 }
 
 fn default_sessions_root() -> PathBuf {

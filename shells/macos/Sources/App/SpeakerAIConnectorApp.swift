@@ -25,6 +25,15 @@ struct SpeakerAIConnectorApp: App {
                 .environmentObject(coordinator)
         }
         .windowResizability(.contentMinSize)
+
+        // v0.2 N2: live dialogue for manual sessions. Auto-opened from
+        // MenuContent's "Start session" button; not opened for Bluetooth
+        // sessions (those stay passive/screen-free per the v0.1 use case).
+        Window("Dialogue", id: "dialogue") {
+            DialogueView()
+                .environmentObject(coordinator)
+        }
+        .windowResizability(.contentMinSize)
     }
 
     private func menuIcon(for status: StatusEvent) -> String {
@@ -50,9 +59,22 @@ struct MenuContent: View {
         Text(coordinator.status.menuBarText)
         Divider()
         Button(startStopLabel) {
+            // Auto-open DialogueView when *starting* a manual session
+            // (per v0.2 N2). Bluetooth-driven sessions stay screen-free.
+            let isStarting = !coordinator.status.manualSessionInFlight
+            if isStarting {
+                NSApp.activate(ignoringOtherApps: true)
+                openWindow(id: "dialogue")
+            }
             coordinator.toggleManualSession()
         }
         .disabled(!startStopEnabled)
+        Button("Dialogue…") {
+            // Manual reopen path — useful after the user has closed the
+            // window and wants to peek at the in-flight session again.
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: "dialogue")
+        }
         Button("Sessions…") {
             NSApp.activate(ignoringOtherApps: true)
             openWindow(id: "sessions")

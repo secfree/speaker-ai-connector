@@ -112,11 +112,105 @@ private struct SettingsPayload: Decodable {
 }
 
 /// Decoded shape of the JSON returned by `speaker_core_coord_status` and
-/// the mutating coordinator calls.
+/// the mutating coordinator calls. The `StatusEvent` is flattened at the
+/// root (`variant`/`name`/`message`); the rest is the v0.2-N2 snapshot
+/// envelope used by the `DialogueView`.
 private struct StatusPayload: Decodable {
     let variant: String
     let name: String?
     let message: String?
+    let revision: UInt64?
+    let gateOpen: Bool?
+    let responding: Bool?
+    let clipEvents: [ClipEventPayload]?
+
+    enum CodingKeys: String, CodingKey {
+        case variant, name, message, revision
+        case gateOpen = "gate_open"
+        case responding
+        case clipEvents = "clip_events"
+    }
+}
+
+/// One entry in the per-session activity log. Matches the Rust
+/// `RecordedEvent { seq, #[flatten] ClipEvent }` shape — `kind` is the
+/// tag from the flattened enum, the rest of the keys depend on `kind`.
+/// Decoded leniently so a future event variant doesn't crash the shell.
+struct DialogueEvent: Identifiable, Equatable {
+    let seq: UInt64
+    let kind: Kind
+
+    enum Kind: Equatable {
+        case sessionStarted(trigger: String, id: String, startUnixSecs: UInt64)
+        case sessionEnded
+        case inputClipStarted(clipSeq: UInt32, offsetMs: UInt64)
+        case inputClipEnded(clipSeq: UInt32, durationMs: UInt64, path: String)
+        case outputClipStarted(clipSeq: UInt32, offsetMs: UInt64)
+        case outputClipEnded(clipSeq: UInt32, durationMs: UInt64, path: String)
+        case unknown(String)
+    }
+
+    /// Stable id for SwiftUI ForEach. The coordinator's seq is unique
+    /// per session and monotonically increasing — perfect for diffing.
+    var id: UInt64 { seq }
+}
+
+/// Raw decoder for one element of `clip_events`. The Rust side flattens
+/// `kind` + variant-specific fields onto one object; `event_seq` is the
+/// coordinator's monotonic event counter (renamed at JSON level to dodge
+/// the collision with `ClipEvent` variants that carry a `seq` for the
+/// clip ordinal).
+private struct ClipEventPayload: Decodable {
+    let eventSeq: UInt64
+    let kind: String
+    let seq: UInt32?
+    let offsetMs: UInt64?
+    let durationMs: UInt64?
+    let path: String?
+    let trigger: String?
+    let id: String?
+    let startUnixSecs: UInt64?
+
+    enum CodingKeys: String, CodingKey {
+        case eventSeq = "event_seq"
+        case kind, seq, path, trigger, id
+        case offsetMs = "offset_ms"
+        case durationMs = "duration_ms"
+        case startUnixSecs = "start_unix_secs"
+    }
+
+    fileprivate func intoDialogueEvent() -> DialogueEvent {
+        let kindEnum: DialogueEvent.Kind
+        switch kind {
+        case "session_started":
+            kindEnum = .sessionStarted(
+                trigger: trigger ?? "manual",
+                id: id ?? "",
+                startUnixSecs: startUnixSecs ?? 0
+            )
+        case "session_ended":
+            kindEnum = .sessionEnded
+        case "input_clip_started":
+            kindEnum = .inputClipStarted(clipSeq: seq ?? 0, offsetMs: offsetMs ?? 0)
+        case "input_clip_ended":
+            kindEnum = .inputClipEnded(
+                clipSeq: seq ?? 0,
+                durationMs: durationMs ?? 0,
+                path: path ?? ""
+            )
+        case "output_clip_started":
+            kindEnum = .outputClipStarted(clipSeq: seq ?? 0, offsetMs: offsetMs ?? 0)
+        case "output_clip_ended":
+            kindEnum = .outputClipEnded(
+                clipSeq: seq ?? 0,
+                durationMs: durationMs ?? 0,
+                path: path ?? ""
+            )
+        default:
+            kindEnum = .unknown(kind)
+        }
+        return DialogueEvent(seq: eventSeq, kind: kindEnum)
+    }
 }
 
 @MainActor
@@ -127,6 +221,21 @@ final class Coordinator: ObservableObject {
     @Published private(set) var apiKeyStored: Bool = false
     @Published private(set) var loginItemEnabled: Bool = false
     @Published private(set) var loginItemError: String? = nil
+
+    // --- v0.2 N2: live dialogue surface ----------------------------------
+    /// Per-session activity log, fed off the coordinator's status snapshot.
+    /// The shell's `DialogueView` renders one row per `DialogueEvent`,
+    /// pairing started/ended clip events into a single playable row.
+    @Published private(set) var dialogueEvents: [DialogueEvent] = []
+    /// True while the VAD gate is open ("listening…").
+    @Published private(set) var gateOpen: Bool = false
+    /// True while Gemini is streaming a response ("responding…").
+    @Published private(set) var responding: Bool = false
+    /// Most recent SessionStarted event from the active log, if any.
+    /// Drives the DialogueView header and lets the window auto-close
+    /// state when the session ends.
+    @Published private(set) var currentSessionId: String? = nil
+    @Published private(set) var currentSessionStartUnix: UInt64? = nil
 
     /// Mirrors of the persisted settings. Writing flushes through the
     /// FFI so the Rust side is the source of truth — these `@Published`
@@ -554,6 +663,29 @@ final class Coordinator: ObservableObject {
         do {
             let p = try JSONDecoder().decode(StatusPayload.self, from: data)
             status = Self.statusEvent(from: p)
+            gateOpen = p.gateOpen ?? false
+            responding = p.responding ?? false
+            let events = (p.clipEvents ?? []).map { $0.intoDialogueEvent() }
+            dialogueEvents = events
+            // Pull the active session header off the most recent
+            // SessionStarted; clear when SessionEnded is the last event.
+            var sessId: String? = nil
+            var sessStart: UInt64? = nil
+            for event in events {
+                switch event.kind {
+                case .sessionStarted(_, let id, let startUnix):
+                    sessId = id
+                    sessStart = startUnix
+                case .sessionEnded:
+                    // Keep the id/start so the window header still says
+                    // "Session ended at …" until the next session opens.
+                    break
+                default:
+                    break
+                }
+            }
+            currentSessionId = sessId
+            currentSessionStartUnix = sessStart
         } catch {
             log.error("decode status failed: \(error.localizedDescription, privacy: .public)")
         }

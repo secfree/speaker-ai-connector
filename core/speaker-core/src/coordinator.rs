@@ -37,7 +37,7 @@ use crate::gemini::GeminiError;
 use crate::last_error;
 #[cfg(target_os = "macos")]
 use crate::routing;
-use crate::sessions::SessionTrigger;
+use crate::sessions::{ClipEvent, SessionTrigger};
 use crate::vad::Sensitivity;
 
 /// Default debounce window for repeated BT connect events. Long enough
@@ -115,10 +115,52 @@ struct Inner {
     state: SessionState,
     last_connect_at: Option<Instant>,
     target_name: Option<String>,
-    /// Monotonically increments on every state change so the shell can
-    /// poll efficiently — "has anything changed since I last saw rev N?"
-    /// — rather than diffing JSON payloads.
+    /// Monotonically increments on every state change AND on every clip
+    /// event so the shell can poll efficiently — "has anything changed
+    /// since I last saw rev N?" — rather than diffing JSON payloads.
     revision: u64,
+    /// Per-session activity log surfaced to the `DialogueView`. Each
+    /// entry has a monotonic `seq` so the shell can dedupe across polls.
+    /// Cleared when a new session starts so a long-lived shell doesn't
+    /// accumulate stale rows.
+    clip_events: Vec<RecordedEvent>,
+    /// Monotonic event sequence, bumped per appended `ClipEvent`. The
+    /// shell tracks the last `seq` it has rendered.
+    clip_event_seq: u64,
+    /// Derived state: VAD gate currently open (input clip in progress).
+    /// The shell renders "listening…" off this.
+    gate_open: bool,
+    /// Derived state: Gemini currently emitting an output clip. The
+    /// shell renders "responding…" off this.
+    responding: bool,
+}
+
+/// One log entry in the per-session activity buffer. `event_seq` is the
+/// coordinator's monotonic counter (renamed at JSON level to dodge the
+/// collision with `ClipEvent` variants that also carry a `seq` for the
+/// clip ordinal); `event` is the raw ClipEvent payload flattened so the
+/// shell sees one object per log row.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordedEvent {
+    #[serde(rename = "event_seq")]
+    pub seq: u64,
+    #[serde(flatten)]
+    pub event: ClipEvent,
+}
+
+/// JSON envelope returned by `speaker_core_coord_status` and the mutating
+/// coordinator calls. Flattens `StatusEvent` into the root so existing
+/// shell decoders that pattern-match on `variant` keep working; the new
+/// fields (`clip_events`, `gate_open`, `responding`, `revision`) are
+/// additive.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusSnapshot {
+    #[serde(flatten)]
+    pub status: StatusEvent,
+    pub revision: u64,
+    pub clip_events: Vec<RecordedEvent>,
+    pub gate_open: bool,
+    pub responding: bool,
 }
 
 impl Inner {
@@ -174,6 +216,10 @@ impl Coordinator {
                     last_connect_at: None,
                     target_name: None,
                     revision: 0,
+                    clip_events: Vec::new(),
+                    clip_event_seq: 0,
+                    gate_open: false,
+                    responding: false,
                 }),
                 generation: AtomicU64::new(0),
             };
@@ -183,12 +229,34 @@ impl Coordinator {
             audio::set_async_teardown_callback(Some(Arc::new(|| {
                 Coordinator::instance().on_async_teardown();
             })));
+            // Same idea for per-clip events — the audio layer fires one
+            // after each successful recorder begin/end_clip + on session
+            // boundaries. The coordinator stores them in the per-session
+            // log the `DialogueView` polls via the status snapshot.
+            audio::set_clip_event_callback(Some(Arc::new(|event| {
+                Coordinator::instance().on_clip_event(event);
+            })));
             coord
         })
     }
 
     pub fn status(&self) -> StatusEvent {
         self.inner.lock().unwrap().status()
+    }
+
+    /// Full status payload — `StatusEvent` plus the per-session activity
+    /// log and derived `gate_open` / `responding` flags. This is what
+    /// `speaker_core_coord_status` returns; the `DialogueView` reads
+    /// `clip_events` off the snapshot and dedupes by `seq`.
+    pub fn status_snapshot(&self) -> StatusSnapshot {
+        let inner = self.inner.lock().unwrap();
+        StatusSnapshot {
+            status: inner.status(),
+            revision: inner.revision,
+            clip_events: inner.clip_events.clone(),
+            gate_open: inner.gate_open,
+            responding: inner.responding,
+        }
     }
 
     pub fn revision(&self) -> u64 {
@@ -419,6 +487,47 @@ impl Coordinator {
         })
     }
 
+    /// Called from the audio layer on every clip-level event. Updates
+    /// the derived `gate_open` / `responding` flags so the shell renders
+    /// the live indicators, appends to the per-session log, and bumps
+    /// `revision` so the polling shell knows to refetch the snapshot.
+    fn on_clip_event(&self, event: ClipEvent) {
+        let mut inner = self.inner.lock().unwrap();
+        // `SessionStarted` resets the log so a long-lived shell window
+        // doesn't accumulate stale rows across sessions. The event
+        // itself is preserved as the first entry so the shell still
+        // gets the session header.
+        if matches!(event, ClipEvent::SessionStarted { .. }) {
+            inner.clip_events.clear();
+            inner.gate_open = false;
+            inner.responding = false;
+        }
+        // Update derived flags before we move `event` into the log.
+        match &event {
+            ClipEvent::InputClipStarted { .. } => inner.gate_open = true,
+            ClipEvent::InputClipEnded { .. } => inner.gate_open = false,
+            ClipEvent::OutputClipStarted { .. } => inner.responding = true,
+            ClipEvent::OutputClipEnded { .. } => inner.responding = false,
+            ClipEvent::SessionEnded => {
+                inner.gate_open = false;
+                inner.responding = false;
+            }
+            ClipEvent::SessionStarted { .. } => {}
+        }
+        inner.clip_event_seq += 1;
+        let seq = inner.clip_event_seq;
+        inner.clip_events.push(RecordedEvent { seq, event });
+        // Cap the log so an absurdly long session doesn't grow unbounded.
+        // 1024 entries ≈ a full hour of busy turn-taking at one event
+        // every 3-4 seconds and is still cheap to clone on each poll.
+        const MAX_EVENTS: usize = 1024;
+        if inner.clip_events.len() > MAX_EVENTS {
+            let drop = inner.clip_events.len() - MAX_EVENTS;
+            inner.clip_events.drain(..drop);
+        }
+        inner.revision += 1;
+    }
+
     /// Called from the audio layer when an in-flight session collapses
     /// asynchronously (Gemini Error / Closed). The session_slot has
     /// already been emptied by the time we get here.
@@ -633,6 +742,70 @@ mod tests {
             name: "Other".into(),
         });
         assert_eq!(coord.revision(), before);
+    }
+
+    #[test]
+    fn clip_events_drive_gate_and_responding_flags() {
+        let _g = reset_singleton(None);
+        let coord = Coordinator::instance();
+        // Drop any leftover events from previous coordinator tests so
+        // the assertions below see a clean log.
+        {
+            let mut inner = coord.inner.lock().unwrap();
+            inner.clip_events.clear();
+            inner.clip_event_seq = 0;
+            inner.gate_open = false;
+            inner.responding = false;
+        }
+
+        coord.on_clip_event(ClipEvent::SessionStarted {
+            trigger: SessionTrigger::Manual,
+            id: "test-session".into(),
+            start_unix_secs: 0,
+        });
+        let snap = coord.status_snapshot();
+        assert_eq!(snap.clip_events.len(), 1);
+        assert!(!snap.gate_open);
+        assert!(!snap.responding);
+
+        coord.on_clip_event(ClipEvent::InputClipStarted { seq: 1, offset_ms: 100 });
+        let snap = coord.status_snapshot();
+        assert!(snap.gate_open, "InputClipStarted opens the gate");
+        assert!(!snap.responding);
+
+        coord.on_clip_event(ClipEvent::InputClipEnded {
+            seq: 1,
+            duration_ms: 800,
+            path: "/tmp/0001-in.wav".into(),
+        });
+        let snap = coord.status_snapshot();
+        assert!(!snap.gate_open, "InputClipEnded closes the gate");
+
+        coord.on_clip_event(ClipEvent::OutputClipStarted { seq: 1, offset_ms: 1200 });
+        assert!(coord.status_snapshot().responding);
+        coord.on_clip_event(ClipEvent::OutputClipEnded {
+            seq: 1,
+            duration_ms: 600,
+            path: "/tmp/0002-out.wav".into(),
+        });
+        assert!(!coord.status_snapshot().responding);
+
+        // Each event bumps revision so a polling shell repaints.
+        let rev_before = coord.revision();
+        coord.on_clip_event(ClipEvent::SessionEnded);
+        assert!(coord.revision() > rev_before);
+
+        // SessionStarted clears the log (so a long-lived shell doesn't
+        // accumulate stale rows) — and the start marker itself stays.
+        coord.on_clip_event(ClipEvent::SessionStarted {
+            trigger: SessionTrigger::Manual,
+            id: "next-session".into(),
+            start_unix_secs: 1,
+        });
+        let snap = coord.status_snapshot();
+        assert_eq!(snap.clip_events.len(), 1);
+        assert!(!snap.gate_open);
+        assert!(!snap.responding);
     }
 
     #[test]

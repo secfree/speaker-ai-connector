@@ -30,7 +30,8 @@
       "Bash(cargo check *)",
       "Bash(xcodebuild -project shells/macos/SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build)",
       "Bash(cargo metadata *)",
-      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('toml' in [p['name'] for p in d['packages']]\\)\")"
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('toml' in [p['name'] for p in d['packages']]\\)\")",
+      "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug -derivedDataPath /tmp/sac-build build)"
     ]
   }
 }

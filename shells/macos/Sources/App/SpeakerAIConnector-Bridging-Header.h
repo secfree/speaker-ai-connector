@@ -102,18 +102,38 @@ char *speaker_core_last_session_error_message(void);
 char *speaker_core_last_session_error_tag(void);
 void speaker_core_last_session_error_clear(void);
 
-// --- Coordinator (M6) -----------------------------------------------
-// BTEvent in / SessionCommand in / StatusEvent JSON out. Returned
+// --- Coordinator (M6 + v0.2 N2) -------------------------------------
+// BTEvent in / SessionCommand in / StatusSnapshot JSON out. Returned
 // strings must be freed with speaker_core_string_free.
 //
-// StatusEvent JSON shape:
+// StatusSnapshot JSON shape (StatusEvent flattened at root + activity):
 //   { "variant": "idle" | "no_device_selected" | "waiting_for_device"
 //              | "session_launching" | "session_active"
 //              | "manual_session_launching" | "manual_session_active"
 //              | "tearing_down" | "error",
-//     "name": "..."    (waiting_for_device / launching / active / tearing_down)
-//     "message": "..." (error only)
+//     "name": "..."     (waiting_for_device / launching / active / tearing_down)
+//     "message": "..."  (error only)
+//     "revision": N,    (matches speaker_core_coord_revision)
+//     "gate_open": bool,    (true while a VAD-gated input clip is open)
+//     "responding": bool,   (true while Gemini is streaming an output clip)
+//     "clip_events": [      (per-session activity log; dedupe by event_seq)
+//       { "event_seq": 1, "kind": "session_started", "trigger": "manual",
+//         "id": "2026-05-24T...", "start_unix_secs": ... },
+//       { "event_seq": 2, "kind": "input_clip_started",
+//         "seq": 1, "offset_ms": 1234 },
+//       { "event_seq": 3, "kind": "input_clip_ended", "seq": 1,
+//         "duration_ms": 2400, "path": "/abs/path/...wav" },
+//       { "event_seq": 4, "kind": "output_clip_started",
+//         "seq": 1, "offset_ms": 3700 },
+//       { "event_seq": 5, "kind": "output_clip_ended", "seq": 1,
+//         "duration_ms": 1500, "path": "/abs/path/...wav" },
+//       { "event_seq": 6, "kind": "session_ended" }
+//     ]
 //   }
+//
+// The revision counter bumps on both state-machine transitions AND
+// every clip event, so a 500 ms poll picks up live activity without
+// any extra subscription endpoint.
 
 char *speaker_core_coord_push_bt_connect(const char *address, const char *name);
 char *speaker_core_coord_push_bt_disconnect(const char *address, const char *name);

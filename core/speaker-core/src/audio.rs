@@ -20,7 +20,7 @@ use crate::gemini::{
     EventSink, GeminiError, GeminiEvent, GeminiSession, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE,
 };
 use crate::last_error;
-use crate::sessions::{ClipDirection, SessionRecorder, SessionTrigger};
+use crate::sessions::{ClipDirection, ClipEvent, SessionRecorder, SessionTrigger};
 use crate::vad::{Sensitivity, VadRelay};
 
 #[derive(Debug)]
@@ -351,11 +351,19 @@ pub fn start_vad_diagnostic(sensitivity: Sensitivity) -> Result<(), AudioError> 
                     eprintln!(
                         "speaker-core: vad gate OPEN (seen {session_frames} frames so far)"
                     );
-                    if let Err(e) = recorder.begin_clip(ClipDirection::In) {
-                        // Log and keep running — losing one clip is
-                        // better than tearing down the diagnostic mid-
-                        // session over a transient FS error.
-                        eprintln!("speaker-core: session begin_clip failed: {e:?}");
+                    match recorder.begin_clip(ClipDirection::In) {
+                        Ok(begin) => {
+                            fire_clip_event(ClipEvent::InputClipStarted {
+                                seq: begin.seq,
+                                offset_ms: secs_to_ms(begin.offset_secs),
+                            });
+                        }
+                        Err(e) => {
+                            // Log and keep running — losing one clip is
+                            // better than tearing down the diagnostic mid-
+                            // session over a transient FS error.
+                            eprintln!("speaker-core: session begin_clip failed: {e:?}");
+                        }
                     }
                 }
                 for frame in &out.frames {
@@ -365,8 +373,17 @@ pub fn start_vad_diagnostic(sensitivity: Sensitivity) -> Result<(), AudioError> 
                     }
                 }
                 if out.closed {
-                    if let Err(e) = recorder.end_clip(ClipDirection::In) {
-                        eprintln!("speaker-core: session end_clip failed: {e:?}");
+                    match recorder.end_clip(ClipDirection::In) {
+                        Ok(end) => {
+                            fire_clip_event(ClipEvent::InputClipEnded {
+                                seq: end.seq,
+                                duration_ms: secs_to_ms(end.duration_secs),
+                                path: end.path.to_string_lossy().into_owned(),
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("speaker-core: session end_clip failed: {e:?}");
+                        }
                     }
                     eprintln!(
                         "speaker-core: vad gate CLOSED (forwarded {forwarded_frames} of {session_frames} frames)"
@@ -447,6 +464,41 @@ fn fire_async_teardown() {
     }
 }
 
+/// Per-clip event sink — the coordinator registers this so the shell's
+/// `DialogueView` can render a live transcript without tapping PCM. Fired
+/// on session boundaries and every successful recorder begin/end_clip.
+type ClipEventCallback = Arc<dyn Fn(ClipEvent) + Send + Sync + 'static>;
+fn clip_event_cb_slot() -> &'static Mutex<Option<ClipEventCallback>> {
+    static SLOT: OnceLock<Mutex<Option<ClipEventCallback>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+pub fn set_clip_event_callback(cb: Option<ClipEventCallback>) {
+    *clip_event_cb_slot().lock().unwrap() = cb;
+}
+
+fn fire_clip_event(event: ClipEvent) {
+    let cb = clip_event_cb_slot().lock().unwrap().clone();
+    if let Some(cb) = cb {
+        cb(event);
+    }
+}
+
+/// Floats in, milliseconds out, saturating at u64::MAX. Used for
+/// timestamping `ClipEvent`s — the shell renders integer ms, never the
+/// raw f64 secs from the recorder.
+fn secs_to_ms(secs: f64) -> u64 {
+    if !secs.is_finite() || secs <= 0.0 {
+        return 0;
+    }
+    let v = (secs * 1000.0).round();
+    if v >= u64::MAX as f64 {
+        u64::MAX
+    } else {
+        v as u64
+    }
+}
+
 /// Bounded so a runaway response can't pin unbounded memory. ~5 s of
 /// 24 kHz mono i16 = 240 kB — well under any reasonable response burst.
 const PLAYBACK_QUEUE_CAP_SAMPLES: usize = 24_000 * 5;
@@ -502,7 +554,7 @@ pub fn start_session(
     // Open the on-disk session before connecting Gemini — if the recorder
     // can't open, we want the failure before any network spend.
     let recorder = SessionRecorder::instance();
-    recorder
+    let session_id = recorder
         .start_session(trigger, target_address.clone(), INPUT_SAMPLE_RATE)
         .map_err(|e| {
             eprintln!("speaker-core: session recorder start failed: {e:?}");
@@ -533,10 +585,17 @@ pub fn start_session(
             GeminiEvent::AudioChunk(samples) => {
                 let rec = SessionRecorder::instance();
                 if !out_clip_for_sink.load(Ordering::SeqCst) {
-                    if let Err(e) = rec.begin_clip(ClipDirection::Out) {
-                        eprintln!("speaker-core: gemini begin_clip(Out) failed: {e:?}");
-                    } else {
-                        out_clip_for_sink.store(true, Ordering::SeqCst);
+                    match rec.begin_clip(ClipDirection::Out) {
+                        Ok(begin) => {
+                            out_clip_for_sink.store(true, Ordering::SeqCst);
+                            fire_clip_event(ClipEvent::OutputClipStarted {
+                                seq: begin.seq,
+                                offset_ms: secs_to_ms(begin.offset_secs),
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("speaker-core: gemini begin_clip(Out) failed: {e:?}");
+                        }
                     }
                 }
                 if out_clip_for_sink.load(Ordering::SeqCst) {
@@ -557,8 +616,17 @@ pub fn start_session(
                     .is_ok()
                 {
                     let rec = SessionRecorder::instance();
-                    if let Err(e) = rec.end_clip(ClipDirection::Out) {
-                        eprintln!("speaker-core: gemini end_clip(Out) failed: {e:?}");
+                    match rec.end_clip(ClipDirection::Out) {
+                        Ok(end) => {
+                            fire_clip_event(ClipEvent::OutputClipEnded {
+                                seq: end.seq,
+                                duration_ms: secs_to_ms(end.duration_secs),
+                                path: end.path.to_string_lossy().into_owned(),
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("speaker-core: gemini end_clip(Out) failed: {e:?}");
+                        }
                     }
                 }
                 if matches!(event, GeminiEvent::Interrupted) {
@@ -695,8 +763,16 @@ pub fn start_session(
                 let out = relay.process(&batch);
                 let recorder = SessionRecorder::instance();
                 if out.opened {
-                    if let Err(e) = recorder.begin_clip(ClipDirection::In) {
-                        eprintln!("speaker-core: manual begin_clip(In) failed: {e:?}");
+                    match recorder.begin_clip(ClipDirection::In) {
+                        Ok(begin) => {
+                            fire_clip_event(ClipEvent::InputClipStarted {
+                                seq: begin.seq,
+                                offset_ms: secs_to_ms(begin.offset_secs),
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("speaker-core: manual begin_clip(In) failed: {e:?}");
+                        }
                     }
                 }
                 for frame in &out.frames {
@@ -720,8 +796,17 @@ pub fn start_session(
                     }
                 }
                 if out.closed {
-                    if let Err(e) = recorder.end_clip(ClipDirection::In) {
-                        eprintln!("speaker-core: manual end_clip(In) failed: {e:?}");
+                    match recorder.end_clip(ClipDirection::In) {
+                        Ok(end) => {
+                            fire_clip_event(ClipEvent::InputClipEnded {
+                                seq: end.seq,
+                                duration_ms: secs_to_ms(end.duration_secs),
+                                path: end.path.to_string_lossy().into_owned(),
+                            });
+                        }
+                        Err(e) => {
+                            eprintln!("speaker-core: manual end_clip(In) failed: {e:?}");
+                        }
                     }
                 }
             },
@@ -742,6 +827,18 @@ pub fn start_session(
         _output: output_stream,
         _gemini: gemini,
     });
+    // Tell the coordinator (and through it the shell) that a brand-new
+    // session is live. Drop the guard first so the callback can't
+    // re-enter the session_slot if it ever needs to.
+    drop(guard);
+    fire_clip_event(ClipEvent::SessionStarted {
+        trigger,
+        id: session_id,
+        start_unix_secs: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
     Ok(())
 }
 
@@ -751,14 +848,22 @@ pub fn stop_manual_session() {
 
 pub fn stop_session() {
     let mut guard = session_slot().lock().unwrap();
+    let was_active = guard.is_some();
     // Drop order matters: streams first (release CoreAudio callbacks that
     // hold the upload handle), then GeminiSession (joins its thread).
     *guard = None;
+    drop(guard);
     let recorder = SessionRecorder::instance();
-    if recorder.is_active() {
+    let recorder_was_active = recorder.is_active();
+    if recorder_was_active {
         if let Err(e) = recorder.end_session() {
             eprintln!("speaker-core: session end failed: {e:?}");
         }
+    }
+    // Fire SessionEnded only if we actually tore something down — repeated
+    // stop_session() calls (idempotent surface) shouldn't spam the shell.
+    if was_active || recorder_was_active {
+        fire_clip_event(ClipEvent::SessionEnded);
     }
 }
 
