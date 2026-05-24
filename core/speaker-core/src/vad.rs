@@ -20,14 +20,22 @@ use std::convert::TryFrom;
 
 use fvad::{Fvad, Mode, SampleRate};
 
+#[cfg(feature = "silero")]
+use crate::vad_silero::SileroEngine;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum VadError {
     /// `Fvad::new` returned null — allocator failure.
     Alloc,
-    /// Sample rate isn't one of 8/16/32/48 kHz.
+    /// Sample rate isn't one of 8/16/32/48 kHz (WebRTC) or 16 kHz (Silero).
     InvalidSampleRate(u32),
     /// Frame duration isn't one of 10/20/30 ms.
     InvalidFrameMs(u32),
+    /// Engine-specific construction failure (e.g. Silero ONNX load).
+    /// The wrapped string is the engine's own `Display`-formatted error;
+    /// kept as a `String` so this enum stays `PartialEq` for tests and
+    /// doesn't pull engine types into every caller's match arms.
+    EngineInit(String),
 }
 
 /// Four aggressiveness levels, matching `libfvad`'s modes. Named
@@ -98,12 +106,17 @@ impl VadEngineKind {
 }
 
 /// Per-frame voice decision engine. Each variant owns whatever state
-/// it needs (an `Fvad` handle for WebRTC, an `ort::Session` for Silero
-/// once N2 lands). The relay calls `is_voice` once per fixed-size frame
-/// and lets `Gate` handle the open/close timing.
+/// it needs (an `Fvad` handle for WebRTC, an `ort::Session` for Silero).
+/// The relay calls `is_voice` once per fixed-size frame and lets `Gate`
+/// handle the open/close timing.
+///
+/// The `Silero` variant is gated behind the `silero` cargo feature so
+/// the WebRTC-only build path (headless tests / CI without the ONNX
+/// runtime) stays available.
 pub enum VadEngine {
     WebRtc(WebRtcEngine),
-    // Silero(SileroEngine) — added in v0.3 N2.
+    #[cfg(feature = "silero")]
+    Silero(SileroEngine),
 }
 
 impl VadEngine {
@@ -112,6 +125,19 @@ impl VadEngine {
     fn is_voice(&mut self, frame: &[i16]) -> bool {
         match self {
             VadEngine::WebRtc(e) => e.is_voice(frame),
+            #[cfg(feature = "silero")]
+            VadEngine::Silero(e) => e.is_voice(frame),
+        }
+    }
+
+    /// Engine-specific score / mode descriptor, used by the N3 diagnostic
+    /// log so a `vad gate OPEN/CLOSED` line can carry the WebRTC mode
+    /// or Silero's last probability without leaking engine internals.
+    pub fn score_label(&self) -> String {
+        match self {
+            VadEngine::WebRtc(_) => "webrtc".into(),
+            #[cfg(feature = "silero")]
+            VadEngine::Silero(e) => format!("silero p={:.3}", e.last_score()),
         }
     }
 }
@@ -210,6 +236,36 @@ impl VadRelay {
     ) -> Result<Self, VadError> {
         let engine = VadEngine::WebRtc(WebRtcEngine::new(sample_rate, sensitivity)?);
         Self::new(engine, sample_rate, frame_ms, preroll_frames, hangover_frames)
+    }
+
+    /// Convenience constructor for the Silero path. `threshold` is the
+    /// fixed-point `0..=1000` (0.0..=1.0 probability) form used by the
+    /// FFI / persisted settings. `sample_rate` must be 16 kHz — Silero
+    /// v5's window is sized for it; other rates aren't supported here.
+    ///
+    /// Returns `VadError::EngineInit` (wrapping the `SileroError`'s
+    /// `Display`) if the ONNX model can't be loaded.
+    #[cfg(feature = "silero")]
+    pub fn new_silero(
+        sample_rate: u32,
+        frame_ms: u32,
+        model_path: impl AsRef<std::path::Path>,
+        threshold: u16,
+        preroll_frames: usize,
+        hangover_frames: usize,
+    ) -> Result<Self, VadError> {
+        if sample_rate != 16_000 {
+            return Err(VadError::InvalidSampleRate(sample_rate));
+        }
+        let engine = SileroEngine::new(model_path, threshold)
+            .map_err(|e| VadError::EngineInit(e.to_string()))?;
+        Self::new(
+            VadEngine::Silero(engine),
+            sample_rate,
+            frame_ms,
+            preroll_frames,
+            hangover_frames,
+        )
     }
 
     pub fn frame_samples(&self) -> usize {
@@ -492,6 +548,35 @@ mod tests {
         assert!(!out.closed);
         assert!(out.frames.is_empty());
         assert!(!relay.is_open());
+    }
+
+    #[cfg(feature = "silero")]
+    #[test]
+    fn silero_constructor_rejects_non_16k_sample_rate() {
+        // Path is bogus on purpose — sample-rate validation runs before
+        // model load, so the failure mode is the right one. Match the
+        // result rather than unwrap_err so we don't require `VadRelay:
+        // Debug` (its engine field holds a non-Debug `ort::Session`).
+        match VadRelay::new_silero(48_000, 20, "/nonexistent/silero.onnx", 500, 5, 10) {
+            Ok(_) => panic!("expected InvalidSampleRate"),
+            Err(e) => assert_eq!(e, VadError::InvalidSampleRate(48_000)),
+        }
+    }
+
+    #[cfg(feature = "silero")]
+    #[test]
+    fn silero_constructor_surfaces_model_load_failure() {
+        match VadRelay::new_silero(
+            16_000,
+            20,
+            "/this/path/does/not/exist/silero_vad.onnx",
+            500,
+            5,
+            10,
+        ) {
+            Ok(_) => panic!("expected EngineInit error"),
+            Err(e) => assert!(matches!(e, VadError::EngineInit(_)), "got {e:?}"),
+        }
     }
 
     #[test]

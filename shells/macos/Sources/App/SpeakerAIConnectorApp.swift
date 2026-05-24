@@ -4,6 +4,14 @@ import SwiftUI
 struct SpeakerAIConnectorApp: App {
     @StateObject private var coordinator = Coordinator()
 
+    init() {
+        // v0.3 N2: hand the bundled Silero v5 model path to the core
+        // once at launch. The audio path only consults it when the user
+        // has selected the Silero VAD engine in Settings; missing the
+        // file falls back to WebRTC, so we log but don't crash.
+        SileroModelLoader.register()
+    }
+
     var body: some Scene {
         MenuBarExtra {
             MenuContent()

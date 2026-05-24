@@ -45,6 +45,42 @@ pub extern "C" fn speaker_core_audio_loopback_stop() {
     audio::stop_loopback();
 }
 
+/// Register the absolute filesystem path to the bundled Silero v5 ONNX
+/// model. The shell calls this once at launch with the path of the file
+/// copied into `Contents/Resources/silero_vad.onnx`; the audio path then
+/// uses it whenever the user has selected `VadEngineKind::Silero`.
+///
+/// Returns 0 on success, `-100` if the path pointer is null / non-UTF-8,
+/// or `-201` if the build wasn't compiled with the `silero` feature (the
+/// shell can treat that as "Silero engine unavailable, fall back to
+/// WebRTC"). v0.3 N2.
+#[no_mangle]
+pub extern "C" fn speaker_core_set_silero_model_path(path: *const c_char) -> i32 {
+    if path.is_null() {
+        return -100;
+    }
+    let s = match unsafe { CStr::from_ptr(path) }.to_str() {
+        Ok(s) if !s.is_empty() => s,
+        _ => return -100,
+    };
+    #[cfg(feature = "silero")]
+    {
+        crate::vad_silero::set_model_path(std::path::PathBuf::from(s));
+        0
+    }
+    #[cfg(not(feature = "silero"))]
+    {
+        // Quietly record the attempt for the curious grepper, but tell
+        // the shell so it can pick a fallback rather than waiting for a
+        // session-start failure.
+        eprintln!(
+            "speaker-core: set_silero_model_path({}) ignored — built without the `silero` feature",
+            s
+        );
+        -201
+    }
+}
+
 /// Run the VAD diagnostic: default input → 16 kHz mono i16 → VAD relay
 /// → SessionRecorder. Each gate OPEN→CLOSED pair becomes one input
 /// clip under the sessions directory. No audio leaves the machine.

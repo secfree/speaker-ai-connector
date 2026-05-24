@@ -22,6 +22,7 @@ use crate::gemini::{
 use crate::last_error;
 use crate::responder::{ResponderInit, ResponderSession};
 use crate::sessions::{ClipDirection, ClipEvent, SessionRecorder, SessionTrigger};
+use crate::config::{Settings, VadEngineKind};
 use crate::vad::{VadRelay, WebRtcSensitivity};
 
 #[derive(Debug)]
@@ -236,6 +237,81 @@ const VAD_PREROLL_FRAMES: usize = 15;
 /// thinking child doesn't drop mid-utterance, short enough that the
 /// gate actually closes between turns.
 const VAD_HANGOVER_FRAMES: usize = 35;
+
+/// Build the per-session `VadRelay` honoring the user-selected engine.
+///
+/// WebRTC: uses the supplied `sensitivity`. Silero: ignores it and reads
+/// `silero_threshold` + the registered model path. If the user selected
+/// Silero but either (a) the core was built without the `silero` cargo
+/// feature, or (b) the shell never registered a model path, we log and
+/// fall back to WebRTC — preferable to refusing to start the session
+/// over an engine selection the user can't see from a missing menu-bar
+/// item.
+fn build_session_vad_relay(sensitivity: WebRtcSensitivity) -> Result<VadRelay, AudioError> {
+    let settings = Settings::current();
+    match settings.vad_engine {
+        VadEngineKind::WebRtc => VadRelay::new_webrtc(
+            INPUT_SAMPLE_RATE,
+            VAD_FRAME_MS,
+            sensitivity,
+            VAD_PREROLL_FRAMES,
+            VAD_HANGOVER_FRAMES,
+        )
+        .map_err(|e| AudioError::VadInit(format!("{e:?}"))),
+        VadEngineKind::Silero => {
+            #[cfg(feature = "silero")]
+            {
+                match crate::vad_silero::model_path() {
+                    Some(path) => {
+                        eprintln!(
+                            "speaker-core: session vad engine = silero (threshold={}, model={})",
+                            settings.silero_threshold,
+                            path.display()
+                        );
+                        VadRelay::new_silero(
+                            INPUT_SAMPLE_RATE,
+                            VAD_FRAME_MS,
+                            path,
+                            settings.silero_threshold,
+                            VAD_PREROLL_FRAMES,
+                            VAD_HANGOVER_FRAMES,
+                        )
+                        .map_err(|e| AudioError::VadInit(format!("{e:?}")))
+                    }
+                    None => {
+                        eprintln!(
+                            "speaker-core: silero engine selected but no model path registered — \
+                             falling back to WebRTC (sensitivity={sensitivity:?})"
+                        );
+                        VadRelay::new_webrtc(
+                            INPUT_SAMPLE_RATE,
+                            VAD_FRAME_MS,
+                            sensitivity,
+                            VAD_PREROLL_FRAMES,
+                            VAD_HANGOVER_FRAMES,
+                        )
+                        .map_err(|e| AudioError::VadInit(format!("{e:?}")))
+                    }
+                }
+            }
+            #[cfg(not(feature = "silero"))]
+            {
+                eprintln!(
+                    "speaker-core: silero engine selected but core built without `silero` feature — \
+                     falling back to WebRTC (sensitivity={sensitivity:?})"
+                );
+                VadRelay::new_webrtc(
+                    INPUT_SAMPLE_RATE,
+                    VAD_FRAME_MS,
+                    sensitivity,
+                    VAD_PREROLL_FRAMES,
+                    VAD_HANGOVER_FRAMES,
+                )
+                .map_err(|e| AudioError::VadInit(format!("{e:?}")))
+            }
+        }
+    }
+}
 
 struct VadHandle {
     _input: Stream,
@@ -698,14 +774,11 @@ pub fn start_session(
         sample_rate: SampleRate(input_rate),
         buffer_size: cpal::BufferSize::Default,
     };
-    let relay = VadRelay::new_webrtc(
-        INPUT_SAMPLE_RATE,
-        VAD_FRAME_MS,
-        sensitivity,
-        VAD_PREROLL_FRAMES,
-        VAD_HANGOVER_FRAMES,
-    )
-    .map_err(|e| AudioError::VadInit(format!("{e:?}")))?;
+    // Honour the user-selected VAD engine; WebRTC stays as the fallback
+    // path. Engine-specific construction (model load for Silero) happens
+    // here, *not* in the cpal callback — the model file must be open
+    // before the first frame arrives.
+    let relay = build_session_vad_relay(sensitivity)?;
     let mut relay = relay;
 
     let in_step = input_rate as f64 / INPUT_SAMPLE_RATE as f64;

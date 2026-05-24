@@ -20,5 +20,7 @@ pub mod responder;
 pub mod routing;
 pub mod sessions;
 pub mod vad;
+#[cfg(feature = "silero")]
+pub mod vad_silero;
 
 pub use coordinator::{BTEvent, Coordinator, SessionCommand, StatusEvent};

@@ -22,6 +22,12 @@ targets:
       - path: Sources
         excludes:
           - "App/SpeakerAIConnector-Bridging-Header.h"
+      # v0.3 N2: ship the Silero v5 ONNX model + provenance docs inside
+      # the .app bundle so the user doesn't have to download a model on
+      # first launch. The fetch script and README aren't shipped — only
+      # the .onnx weights end up in Contents/Resources/.
+      - path: Resources/silero_vad.onnx
+        buildPhase: resources
     preBuildScripts:
       - name: Build Rust core
         basedOnDependencyAnalysis: false

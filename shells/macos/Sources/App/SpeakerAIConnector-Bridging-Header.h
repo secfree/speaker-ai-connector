@@ -15,6 +15,14 @@ int speaker_core_audio_loopback_start(void);
 // Safe to call when no loopback is running.
 void speaker_core_audio_loopback_stop(void);
 
+// Register the absolute path to the bundled Silero v5 ONNX model. The
+// shell calls this once at launch with the path of the file copied into
+// Contents/Resources/silero_vad.onnx; the audio path uses it whenever
+// the user has selected the Silero VAD engine. Returns 0 on success,
+// -100 if the path is null / non-UTF-8, -201 if the core was built
+// without the `silero` cargo feature.
+int speaker_core_set_silero_model_path(const char *path);
+
 // Override the macOS system default output to the BT speaker whose UID
 // embeds the given MAC address. Returns 0 on success, negative on error
 // (-20 CoreAudio failure, -21 no matching device, -100 bad address).

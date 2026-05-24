@@ -17,9 +17,28 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 fvad = "0.1"
 hound = "3.5"
 keyring = { version = "3", features = ["apple-native"] }
+ndarray = { version = "0.16", optional = true }
+# `ort` is the Rust binding for ONNX Runtime. We keep its default
+# features (`std` is one of them — without it `commit_from_file` and
+# friends disappear) and add `download-binaries` so the build pulls a
+# prebuilt `libonnxruntime` rather than needing a system install,
+# `ndarray` for typed input arrays, and `coreml` so v5 Silero falls
+# onto the ANE / GPU when available (the inference-cost log surfaces
+# it if ort silently falls back to CPU).
+ort = { version = "=2.0.0-rc.10", optional = true, features = ["download-binaries", "ndarray", "coreml"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "macros", "sync", "time", "io-util", "net"] }
 toml = "0.8"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+
+[features]
+# `silero` pulls in the ONNX runtime (~10–15 MB native lib) so the
+# Silero v5 VAD engine is available. Default-on so the macOS shell's
+# `cargo build` (no extra flags) ships with both engines. Headless CI
+# and unit-only test runs can drop it with `--no-default-features` to
+# stay on WebRTC-only — useful before the prebuilt onnxruntime download
+# is wired into the cache.
+default = ["silero"]
+silero = ["dep:ort", "dep:ndarray"]

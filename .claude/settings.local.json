@@ -31,7 +31,16 @@
       "Bash(xcodebuild -project shells/macos/SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build)",
       "Bash(cargo metadata *)",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('toml' in [p['name'] for p in d['packages']]\\)\")",
-      "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug -derivedDataPath /tmp/sac-build build)"
+      "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug -derivedDataPath /tmp/sac-build build)",
+      "Bash(mkdir -p /Users/secfree/projects/github/secfree/speaker-ai-connector/shells/macos/Resources)",
+      "Bash(curl -fsSL --max-time 30 -o silero_vad.onnx \"https://raw.githubusercontent.com/snakers4/silero-vad/v5.1.2/src/silero_vad/data/silero_vad.onnx\")",
+      "Bash(shasum -a 256 silero_vad.onnx)",
+      "Bash(chmod +x /Users/secfree/projects/github/secfree/speaker-ai-connector/shells/macos/Resources/fetch-silero.sh)",
+      "Bash(mkdir -p /Users/secfree/projects/github/secfree/speaker-ai-connector/core/speaker-core/tests/fixtures)",
+      "Read(//private/tmp/**)",
+      "Bash(say -v Samantha -o silero_test.aiff -r 175 \"Hello, this is a short test of the voice activity detector. It should detect speech clearly.\")",
+      "Bash(afconvert -f WAVE -d LEI16@16000 -c 1 silero_test.aiff /Users/secfree/projects/github/secfree/speaker-ai-connector/core/speaker-core/tests/fixtures/silero_speech.wav)",
+      "Bash(file /Users/secfree/projects/github/secfree/speaker-ai-connector/core/speaker-core/tests/fixtures/silero_speech.wav && rm -f /tmp/silero_test.aiff)"
     ]
   }
 }
