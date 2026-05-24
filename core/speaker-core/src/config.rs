@@ -140,8 +140,9 @@ pub struct Settings {
     #[serde(default = "default_model")]
     pub model: String,
     /// Which VAD engine the audio path constructs. v0.3 N1 introduced
-    /// the seam; the WebRTC default keeps older configs unchanged until
-    /// the user opts in to Silero from Settings.
+    /// the seam; v0.3 N3 hardware verification flipped the default to
+    /// Silero — older configs missing the field upgrade to Silero too,
+    /// which matches the verified-better behavior.
     #[serde(default)]
     pub vad_engine: VadEngineKind,
     #[serde(default)]
@@ -301,10 +302,10 @@ force_default_output = false
     }
 
     #[test]
-    fn vad_engine_defaults_to_webrtc_for_older_configs() {
-        // Pre-N1 configs predate the field — `#[serde(default)]` keeps
-        // existing installs on the WebRTC engine so an upgrade doesn't
-        // silently switch the audio path under the user.
+    fn vad_engine_defaults_to_silero_for_older_configs() {
+        // Pre-N1 configs predate the field — `#[serde(default)]` upgrades
+        // them to Silero, the v0.3 N3 verified default. The same code
+        // path covers fresh installs.
         let parsed: Settings = toml::from_str(
             r#"
 target_address = "aa:bb:cc:dd:ee:ff"
@@ -315,7 +316,7 @@ force_default_output = false
 "#,
         )
         .unwrap();
-        assert_eq!(parsed.vad_engine, VadEngineKind::WebRtc);
+        assert_eq!(parsed.vad_engine, VadEngineKind::Silero);
         assert_eq!(parsed.silero_threshold, 500);
     }
 

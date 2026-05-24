@@ -81,10 +81,14 @@ impl WebRtcSensitivity {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum VadEngineKind {
     /// `libfvad` — fast, no model file, ships in the binary.
-    #[default]
     WebRtc,
     /// Silero v5 over ONNX Runtime — neural VAD, ships ~1–2 MB of
-    /// weights inside the .app bundle. Lands in v0.3 N2.
+    /// weights inside the .app bundle. Lands in v0.3 N2. Default since
+    /// v0.3 N3 hardware verification — on the target speaker + child's
+    /// voice it produced noticeably fewer false-positive clips than
+    /// WebRTC at `VeryAggressive`, with no regression on missed
+    /// utterances.
+    #[default]
     Silero,
 }
 
