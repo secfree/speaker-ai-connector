@@ -163,6 +163,7 @@ private struct SettingsPayload: Decodable {
     let silenceTimeoutMs: UInt32
     let forceDefaultOutput: Bool
     let responder: String?
+    let autoSessionOnBtConnect: Bool?
 
     enum CodingKeys: String, CodingKey {
         case targetAddress = "target_address"
@@ -173,6 +174,7 @@ private struct SettingsPayload: Decodable {
         case silenceTimeoutMs = "silence_timeout_ms"
         case forceDefaultOutput = "force_default_output"
         case responder
+        case autoSessionOnBtConnect = "auto_session_on_bt_connect"
     }
 }
 
@@ -336,6 +338,13 @@ final class Coordinator: ObservableObject {
     @Published var responder: ResponderKind {
         didSet { if oldValue != responder { persistResponder() } }
     }
+    /// When true (the default) a BT connect for the configured speaker
+    /// auto-launches a session. When false the user can connect the
+    /// speaker just to play music; "Start session" from the menu bar
+    /// still works manually. v0.4 N1.
+    @Published var autoSessionOnBtConnect: Bool {
+        didSet { if oldValue != autoSessionOnBtConnect { persistAutoSessionOnBtConnect() } }
+    }
 
     let watcher = BluetoothWatcher()
 
@@ -368,6 +377,7 @@ final class Coordinator: ObservableObject {
         self.sileroThreshold = 500
         self.model = ""
         self.responder = .gemini
+        self.autoSessionOnBtConnect = true
         apiKeyStored = (speaker_core_api_key_has() == 1)
         loadSettings()
         loginItemEnabled = LoginItem.isEnabled()
@@ -399,6 +409,9 @@ final class Coordinator: ObservableObject {
             }
             if let raw = p.responder, let r = ResponderKind(tomlVariant: raw) {
                 self.responder = r
+            }
+            if let auto = p.autoSessionOnBtConnect {
+                self.autoSessionOnBtConnect = auto
             }
             // Push the loaded target into the BT watcher so events get
             // filtered correctly from first launch.
@@ -459,6 +472,12 @@ final class Coordinator: ObservableObject {
         guard !loadingSettings else { return }
         let rc = speaker_core_settings_set_responder(responder.rawValue)
         if rc != 0 { log.error("settings_set_responder failed: \(rc)") }
+    }
+
+    private func persistAutoSessionOnBtConnect() {
+        guard !loadingSettings else { return }
+        let rc = speaker_core_settings_set_auto_session_on_bt_connect(autoSessionOnBtConnect ? 1 : 0)
+        if rc != 0 { log.error("settings_set_auto_session_on_bt_connect failed: \(rc)") }
     }
 
     // --- API key (M5) -----------------------------------------------

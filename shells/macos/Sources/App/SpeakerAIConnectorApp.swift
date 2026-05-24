@@ -97,6 +97,8 @@ struct MenuContent: View {
     var body: some View {
         Text(coordinator.status.menuBarText)
         Divider()
+        Toggle("Auto-start session on speaker connect", isOn: autoSessionBinding)
+        Divider()
         Button(startStopLabel) {
             // Auto-open the Sessions window when *starting* a manual
             // session so the user sees the live status + clip stream.
@@ -133,6 +135,18 @@ struct MenuContent: View {
             return "Start session (speaker connected)"
         }
         return "Start session"
+    }
+
+    /// Two-way binding into the Rust-owned flag. SwiftUI's `Toggle`
+    /// inside a `MenuBarExtra` needs an explicit `Binding<Bool>` — the
+    /// `@Published` property's projected value works, but mirroring the
+    /// pattern used by `targetBinding` in SettingsView keeps the surface
+    /// uniform.
+    private var autoSessionBinding: Binding<Bool> {
+        Binding(
+            get: { coordinator.autoSessionOnBtConnect },
+            set: { coordinator.autoSessionOnBtConnect = $0 }
+        )
     }
 
     private var startStopEnabled: Bool {

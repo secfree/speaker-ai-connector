@@ -801,6 +801,23 @@ pub extern "C" fn speaker_core_settings_set_responder(level: u8) -> i32 {
     }
 }
 
+/// Toggle whether a Bluetooth connect for the configured target speaker
+/// auto-launches a session. `true` (the default) matches the screen-free
+/// flow this app exists for; `false` lets the user connect the speaker
+/// just for music without burning API credits — the menu-bar "Start
+/// session" item is still available to launch on demand. Persisted to
+/// TOML. Returns 0 on success or a negative `ConfigError::code()`. v0.4 N1.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_auto_session_on_bt_connect(enabled: u8) -> i32 {
+    match Settings::update(|s| s.auto_session_on_bt_connect = enabled != 0) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn speaker_core_settings_set_force_default_output(enabled: i32) -> i32 {
     match Settings::update(|s| s.force_default_output = enabled != 0) {

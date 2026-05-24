@@ -104,6 +104,13 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Behavior") {
+                Toggle("Auto-start session on speaker connect", isOn: $coordinator.autoSessionOnBtConnect)
+                Text("On by default — connecting the speaker launches an AI session right away. Turn off to use the speaker just for music; you can still start a session manually from the menu bar.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Startup") {
                 Toggle("Start at login", isOn: loginItemBinding)
                 if let err = coordinator.loginItemError {

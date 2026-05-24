@@ -165,6 +165,14 @@ pub struct Settings {
     /// reply; `Nope` swallows input frames and produces nothing. v0.2 N3.
     #[serde(default)]
     pub responder: ResponderKind,
+    /// When `true` (the default), a Bluetooth connect for the configured
+    /// target launches a session immediately — the screen-free flow this
+    /// app exists for. When `false`, the user can connect the speaker
+    /// just for music without paying for an AI session; the menu-bar
+    /// item or `simulate_connect` is still available to launch manually.
+    /// v0.4 N1.
+    #[serde(default = "default_auto_session_on_bt_connect")]
+    pub auto_session_on_bt_connect: bool,
 }
 
 fn default_model() -> String {
@@ -179,6 +187,10 @@ fn default_silero_threshold() -> u16 {
     500
 }
 
+fn default_auto_session_on_bt_connect() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -190,6 +202,7 @@ impl Default for Settings {
             silence_timeout_ms: default_silence_timeout_ms(),
             force_default_output: false,
             responder: ResponderKind::default(),
+            auto_session_on_bt_connect: default_auto_session_on_bt_connect(),
         }
     }
 }
@@ -270,6 +283,7 @@ mod tests {
             silence_timeout_ms: 900,
             force_default_output: true,
             responder: ResponderKind::Nope,
+            auto_session_on_bt_connect: false,
         };
         let text = toml::to_string_pretty(&s).unwrap();
         let parsed: Settings = toml::from_str(&text).unwrap();
@@ -318,6 +332,24 @@ force_default_output = false
         .unwrap();
         assert_eq!(parsed.vad_engine, VadEngineKind::Silero);
         assert_eq!(parsed.silero_threshold, 500);
+    }
+
+    #[test]
+    fn auto_session_on_bt_connect_defaults_to_true_for_older_configs() {
+        // Pre-v0.4-N1 configs predate the field — `#[serde(default = ...)]`
+        // upgrades them to `true`, matching today's behavior where every
+        // BT connect launches a session.
+        let parsed: Settings = toml::from_str(
+            r#"
+target_address = "aa:bb:cc:dd:ee:ff"
+model = "models/gemini-test"
+vad_sensitivity = "Quality"
+silence_timeout_ms = 700
+force_default_output = false
+"#,
+        )
+        .unwrap();
+        assert!(parsed.auto_session_on_bt_connect);
     }
 
     #[test]

@@ -297,6 +297,17 @@ impl Coordinator {
                         return inner.status();
                     }
                     inner.target_name = Some(name.clone());
+                    // v0.4 N1: the user can turn off auto-start to use the
+                    // speaker for music without burning API credits. Read
+                    // the flag at event time so a flip between connects
+                    // takes effect immediately; an active session (manual
+                    // *or* BT) is not torn down by flipping it off.
+                    if !inner.settings.auto_session_on_bt_connect {
+                        eprintln!(
+                            "speaker-core: bt connect ignored: auto-session disabled"
+                        );
+                        return inner.status();
+                    }
                     // Debounce repeat connects (Bluetooth stacks routinely
                     // emit two within a few hundred ms on power-on).
                     if let Some(prev) = inner.last_connect_at {
@@ -716,6 +727,9 @@ mod tests {
         inner.last_connect_at = None;
         inner.target_name = None;
         inner.settings.target_address = target.map(|s| s.to_string());
+        // Restore the v0.4 N1 flag default so a test that flipped it off
+        // doesn't bleed into the next one through the shared singleton.
+        inner.settings.auto_session_on_bt_connect = true;
         guard
     }
 
@@ -839,6 +853,79 @@ mod tests {
         assert_eq!(snap.clip_events.len(), 1);
         assert!(!snap.gate_open);
         assert!(!snap.responding);
+    }
+
+    #[test]
+    fn bt_connect_ignored_when_auto_session_disabled() {
+        let _g = reset_singleton(Some(TARGET));
+        let coord = Coordinator::instance();
+        // Flip the flag without going through the FFI to keep the test
+        // pure-state-machine. `refresh_settings` would otherwise overwrite
+        // it from the on-disk TOML.
+        {
+            let mut inner = coord.inner.lock().unwrap();
+            inner.settings.auto_session_on_bt_connect = false;
+        }
+        let rev_before = coord.revision();
+        let status = coord.handle_bt(BTEvent::Connected {
+            address: TARGET.into(),
+            name: TARGET_NAME.into(),
+        });
+        // No state transition — still WaitingForDevice (Idle inside) with
+        // the friendly name picked up from the event.
+        assert_eq!(coord.revision(), rev_before);
+        assert!(matches!(
+            status,
+            StatusEvent::WaitingForDevice { ref name } if name == TARGET_NAME
+        ));
+        assert!(matches!(
+            coord.inner.lock().unwrap().state,
+            SessionState::Idle
+        ));
+    }
+
+    #[test]
+    fn flag_flip_mid_session_does_not_disrupt_active_session() {
+        // The active session keeps running when the flag flips to false;
+        // the *next* connect (after a disconnect cycle) is the one that
+        // gets gated.
+        let _g = reset_singleton(Some(TARGET));
+        let coord = Coordinator::instance();
+        // Pretend a BT session is currently active.
+        {
+            let mut inner = coord.inner.lock().unwrap();
+            inner.state = SessionState::Active {
+                kind: SessionKind::Bluetooth,
+                name: TARGET_NAME.into(),
+            };
+            inner.settings.auto_session_on_bt_connect = false;
+        }
+        // A disconnect during the active session still tears it down —
+        // the flag only gates Connected events.
+        let status = coord.handle_bt(BTEvent::Disconnected {
+            address: TARGET.into(),
+            name: TARGET_NAME.into(),
+        });
+        assert!(matches!(status, StatusEvent::TearingDown { ref name } if name == TARGET_NAME));
+        // Reset for the next assertion (the spawned teardown thread races
+        // with us; force Idle deterministically).
+        {
+            let mut inner = coord.inner.lock().unwrap();
+            inner.state = SessionState::Idle;
+            inner.last_connect_at = None;
+        }
+        // The reconnect that would normally launch a fresh session is
+        // dropped because the flag is still off.
+        let rev_before = coord.revision();
+        coord.handle_bt(BTEvent::Connected {
+            address: TARGET.into(),
+            name: TARGET_NAME.into(),
+        });
+        assert_eq!(coord.revision(), rev_before);
+        assert!(matches!(
+            coord.inner.lock().unwrap().state,
+            SessionState::Idle
+        ));
     }
 
     #[test]

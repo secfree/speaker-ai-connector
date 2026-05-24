@@ -178,7 +178,8 @@ char *speaker_core_coord_simulate_disconnect(void);
 //     "silero_threshold": 0..=1000,             (v0.3 N1; 0.0..=1.0 ×1000)
 //     "silence_timeout_ms": 700,
 //     "force_default_output": false,
-//     "responder": "Gemini" | "Nope" }
+//     "responder": "Gemini" | "Nope",
+//     "auto_session_on_bt_connect": true }       (v0.4 N1)
 char *speaker_core_settings_get(void);
 
 // All setters persist to TOML and refresh the coordinator's cached
@@ -199,5 +200,9 @@ int speaker_core_settings_set_vad_engine(unsigned char level);
 // 0..=1000 probability threshold (fixed-point of 0.0..=1.0). Returns
 // -101 on out-of-range.
 int speaker_core_settings_set_vad_threshold(unsigned short value);
+// v0.4 N1: gate the auto-launch on BT connect. 1 (default) keeps today's
+// behavior; 0 skips the auto-launch so the speaker can be used just for
+// music. The menu-bar Start-session item still works manually.
+int speaker_core_settings_set_auto_session_on_bt_connect(unsigned char enabled);
 
 #endif
