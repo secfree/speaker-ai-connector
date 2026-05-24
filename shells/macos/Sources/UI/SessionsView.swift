@@ -85,13 +85,38 @@ struct SessionsView: View {
         }
     }
 
-    private var sidebar: some View {
-        List(sessions, selection: $selectedIds) { session in
-            SessionRow(
-                session: session,
-                isLive: isLive(session)
+    /// Sessions bucketed by local calendar day, newest day first, with the
+    /// rows inside each bucket newest first. `SessionsStore.list()` already
+    /// returns sessions in descending `start_unix_secs` order, but sort
+    /// explicitly so the live-row stub (inserted at index 0 in `refresh()`)
+    /// and any future ordering changes don't subtly break the grouping.
+    private var sessionGroups: [SessionGroup] {
+        let grouped = Dictionary(grouping: sessions) { session in
+            Calendar.current.startOfDay(
+                for: Date(timeIntervalSince1970: TimeInterval(session.startUnixSecs))
             )
-            .tag(session.id)
+        }
+        return grouped.keys.sorted(by: >).map { day in
+            SessionGroup(
+                id: day,
+                sessions: grouped[day]!.sorted { $0.startUnixSecs > $1.startUnixSecs }
+            )
+        }
+    }
+
+    private var sidebar: some View {
+        List(selection: $selectedIds) {
+            ForEach(sessionGroups) { group in
+                Section(header: Text(formatSectionDate(group.id))) {
+                    ForEach(group.sessions) { session in
+                        SessionRow(
+                            session: session,
+                            isLive: isLive(session)
+                        )
+                        .tag(session.id)
+                    }
+                }
+            }
         }
         .listStyle(.sidebar)
         .navigationTitle("Sessions")
@@ -363,7 +388,7 @@ private struct SessionRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text(formatStart(session.startUnixSecs))
+                Text(formatSessionRowTitle(session.startUnixSecs))
                     .font(.system(.body, design: .default))
                 if isLive {
                     LiveBadge()
@@ -656,12 +681,43 @@ private struct EmptyStateView: View {
     }
 }
 
+private struct SessionGroup: Identifiable {
+    let id: Date
+    let sessions: [SessionInfo]
+}
+
 private func formatStart(_ unix: UInt64) -> String {
     let date = Date(timeIntervalSince1970: TimeInterval(unix))
     let f = DateFormatter()
     f.dateStyle = .medium
     f.timeStyle = .medium
     return f.string(from: date)
+}
+
+/// 24-hour local time, locale-independent (e.g. `"16:12:18"`). The date
+/// component is dropped because the section header already carries it.
+private let sessionRowTimeFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "HH:mm:ss"
+    return f
+}()
+
+private func formatSessionRowTitle(_ unix: UInt64) -> String {
+    sessionRowTimeFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
+}
+
+/// ISO-like `YYYY-MM-DD` form, locale-independent, used for the sidebar
+/// section headers.
+private let sessionSectionDateFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd"
+    return f
+}()
+
+private func formatSectionDate(_ day: Date) -> String {
+    sessionSectionDateFormatter.string(from: day)
 }
 
 private func formatDuration(_ secs: Double) -> String {
