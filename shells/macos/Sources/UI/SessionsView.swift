@@ -173,9 +173,11 @@ struct SessionsView: View {
         }
         do {
             let player = try AVAudioPlayer(contentsOf: url)
+            player.delegate = playerHolder
             player.prepareToPlay()
             player.play()
             playerHolder.player = player
+            playerHolder.onFinish = { nowPlayingClip = nil }
             nowPlayingClip = PlayingClip(sessionId: session.id, file: clip.file)
         } catch {
             lastError = "Playback failed: \(error.localizedDescription)"
@@ -197,10 +199,20 @@ private struct PlayingClip: Equatable {
 /// AVAudioPlayer is class-typed and needs to outlive the closure that
 /// triggered `.play()`. A bare `@State` AVAudioPlayer? wouldn't keep
 /// the player alive across SwiftUI body re-renders reliably — wrap it
-/// in a small holder object so the reference is explicit.
-@Observable
-final class PlayerHolder {
+/// in a small holder object so the reference is explicit. Doubles as
+/// the `AVAudioPlayerDelegate` so the view can reset its "playing"
+/// state when playback finishes on its own (otherwise the row keeps
+/// showing a Stop button after the clip ends).
+final class PlayerHolder: NSObject, AVAudioPlayerDelegate {
     var player: AVAudioPlayer?
+    var onFinish: (() -> Void)?
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully _: Bool) {
+        if player === self.player {
+            self.player = nil
+            onFinish?()
+        }
+    }
 }
 
 private struct SessionRow: View {

@@ -243,9 +243,11 @@ struct DialogueView: View {
         let url = URL(fileURLWithPath: path)
         do {
             let player = try AVAudioPlayer(contentsOf: url)
+            player.delegate = playerHolder
             player.prepareToPlay()
             player.play()
             playerHolder.player = player
+            playerHolder.onFinish = { nowPlaying = nil }
             nowPlaying = path
             lastError = nil
         } catch {
