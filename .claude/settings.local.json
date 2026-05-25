@@ -44,7 +44,12 @@
       "Bash(cargo rustc *)",
       "Bash(ls -lah /Users/secfree/projects/github/secfree/speaker-ai-connector/core/target/debug/libspeaker_core.a 2>&1; ls /Users/secfree/Library/Caches/ort.pyke.io/dfbin/aarch64-apple-darwin/*/onnxruntime/lib/ 2>&1 | head)",
       "Bash(gh issue *)",
-      "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build CODE_SIGN_IDENTITY=\"\" CODE_SIGNING_REQUIRED=NO)"
+      "Bash(xcodebuild -project SpeakerAIConnector.xcodeproj -scheme SpeakerAIConnector -configuration Debug build CODE_SIGN_IDENTITY=\"\" CODE_SIGNING_REQUIRED=NO)",
+      "Bash(gh api *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(gh repo *)",
+      "Bash(grep -rIn -E \"\\(secfree\\\\.teng|secfree@|teng@|TODO|FIXME|XXX|api[_-]?key.*=.*['\\\\\"][A-Za-z0-9]{10,}|AIza[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}\\)\" --include=\"*.swift\" --include=\"*.rs\" --include=\"*.toml\" --include=\"*.md\" --include=\"*.yml\")"
     ]
   }
 }

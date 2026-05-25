@@ -99,7 +99,7 @@ Single binding in the core, identical on both platforms.
 
 `tokio` + `tokio-tungstenite` (rustls-tls-native-roots) for the WebSocket. Streams gated PCM up at 16 kHz mono i16; routes received 24 kHz mono i16 audio frames to the playback sink. Surfaces typed errors (`NoApiKey`, `AuthFailed`, `Network`, `SafetyBlocked`, `Other`) up to the shell for menu-bar display.
 
-**Default model:** `models/gemini-2.0-flash-live-001` — flash tier for kid-voice turn-taking latency.
+**Default model:** `models/gemini-3.1-flash-live-preview` — flash tier for kid-voice turn-taking latency.
 
 **Safety settings — Live API limitation:** `safetySettings` is a REST-only field on `generateContent`; `BidiGenerateContentSetup` rejects it (the server closes the WebSocket with code 1007 / `Unknown name "safetySettings" at 'setup'`). The Live bidi surface exposes no equivalent harm-threshold knob, so v0.1 falls back to:
 
