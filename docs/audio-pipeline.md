@@ -416,7 +416,12 @@ one per buffer.
    (CoreAudio default).
 2. `SessionRecorder.start_session(...)` — open the session directory.
    Errors here roll back before any network spend.
-3. Build the playback queue (`VecDeque<i16>` bounded to ~5 s of 24 kHz).
+3. Build the playback queue (`VecDeque<i16>`, unbounded; preallocated for
+   ~5 s of 24 kHz mono). The queue is intentionally unbounded — Gemini
+   bursts arrive faster than real-time, and an earlier 5 s cap with a
+   drop-from-front overflow policy garbled mid-response audio while the
+   recorded WAV stayed clean (issue #4). A full response is a few
+   seconds × 24 kHz × 2 B, well under a megabyte, so growth is fine.
 4. Construct the sink closure (Gemini event handler) and pass it to
    `ResponderSession::start` — this opens the WebSocket and blocks ≤15 s
    on `setupComplete`. Any error here calls `end_session` to release the

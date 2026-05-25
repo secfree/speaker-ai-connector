@@ -747,9 +747,12 @@ fn resolve_default_output(host: &Host) -> Result<(Device, SupportedStreamConfig)
     Err(last_err.unwrap_or(AudioError::NoOutputDevice))
 }
 
-/// Bounded so a runaway response can't pin unbounded memory. ~5 s of
-/// 24 kHz mono i16 = 240 kB — well under any reasonable response burst.
-const PLAYBACK_QUEUE_CAP_SAMPLES: usize = 24_000 * 5;
+/// Initial capacity reservation for the playback queue. The queue itself
+/// is unbounded — Gemini Live bursts arrive faster than real-time and a
+/// front-drop overflow policy would corrupt the audio the listener is
+/// about to hear. A worst-case response is a few seconds × 24 kHz × 2 B,
+/// well under a megabyte; let it grow.
+const PLAYBACK_QUEUE_INITIAL_CAPACITY: usize = 24_000 * 5;
 
 /// Hold-off after the model's last sample has nominally finished playing
 /// before the input path is allowed to run VAD again. Covers the output
@@ -824,7 +827,7 @@ pub fn start_session(
     // Shared playback queue: gemini.rs writes 24 kHz mono i16; the output
     // callback drains and resamples to output device rate/channels.
     let playback_queue: Arc<Mutex<VecDeque<i16>>> = Arc::new(Mutex::new(VecDeque::with_capacity(
-        PLAYBACK_QUEUE_CAP_SAMPLES,
+        PLAYBACK_QUEUE_INITIAL_CAPACITY,
     )));
     // Tracks whether an Out clip is currently open in the recorder, so a
     // mid-burst stream of AudioChunks knows to skip begin_clip.
@@ -885,11 +888,11 @@ pub fn start_session(
                 let new_until = std::cmp::max(prev, now_ns).saturating_add(chunk_ns);
                 play_out_for_sink.store(new_until, Ordering::SeqCst);
 
+                // Queue is unbounded on purpose: dropping from the front
+                // (next-to-play) garbled live playback when bursts arrived
+                // faster than real-time, while the saved WAV stayed fine.
+                // See issue #4.
                 let mut q = queue_for_sink.lock().unwrap();
-                let overflow = (q.len() + samples.len()).saturating_sub(PLAYBACK_QUEUE_CAP_SAMPLES);
-                if overflow > 0 {
-                    q.drain(..overflow);
-                }
                 q.extend(samples);
             }
             GeminiEvent::TurnComplete | GeminiEvent::Interrupted => {
