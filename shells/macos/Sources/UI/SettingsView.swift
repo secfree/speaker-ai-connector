@@ -7,6 +7,39 @@ struct SettingsView: View {
     @State private var savedDeviceName: String? = nil
     @State private var apiKeyDraft: String = ""
 
+    /// Languages offered in the Main / Alternative pickers. Free-text on
+    /// the wire so a user editing `config.toml` by hand can pick anything
+    /// the model understands — this list is the convenience surface, not
+    /// a validation list. Order matches rough global speaker count.
+    fileprivate static let languagePresets: [String] = [
+        "English",
+        "Mandarin Chinese",
+        "Spanish",
+        "Hindi",
+        "Arabic",
+        "Portuguese",
+        "Russian",
+        "Japanese",
+        "German",
+        "French",
+        "Korean",
+        "Italian",
+    ]
+
+    fileprivate static func mainLanguageOptions(current: String) -> [String] {
+        guard !current.isEmpty, !languagePresets.contains(current) else {
+            return languagePresets
+        }
+        return [current] + languagePresets
+    }
+
+    fileprivate static func altLanguageOptions(current: String) -> [String] {
+        guard !current.isEmpty, !languagePresets.contains(current) else {
+            return languagePresets
+        }
+        return [current] + languagePresets
+    }
+
     /// Cadence for re-polling Bluetooth connection state while Settings
     /// is open. `IOBluetooth`'s connect notifications fire on the watcher
     /// but are filtered to the target device; a small timer is the
@@ -167,6 +200,34 @@ struct SettingsView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("Silero VAD model — MIT license, github.com/snakers4/silero-vad.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Language") {
+                // Append any hand-edited value not in the preset list so
+                // the Picker can still display it instead of falling back
+                // to no-selection (which would overwrite the user's TOML
+                // on the next interaction).
+                Picker("Main", selection: $coordinator.mainLanguage) {
+                    ForEach(SettingsView.mainLanguageOptions(current: coordinator.mainLanguage), id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                }
+                .pickerStyle(.menu)
+                Picker("Alternative", selection: $coordinator.alternativeLanguage) {
+                    Text("None").tag("")
+                    ForEach(SettingsView.altLanguageOptions(current: coordinator.alternativeLanguage), id: \.self) { name in
+                        Text(name).tag(name)
+                    }
+                }
+                .pickerStyle(.menu)
+                Text("Gemini Live drifts to other languages without an explicit pin. Set Alternative if your child sometimes speaks a second language; otherwise leave it on None.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if coordinator.status.sessionInFlight {
+                    Text("A session is in flight — the change takes effect on the next session.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

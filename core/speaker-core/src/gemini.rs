@@ -79,18 +79,35 @@ pub const INPUT_SAMPLE_RATE: u32 = 16_000;
 /// the output device rate.
 pub const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 
-/// System instruction nudged toward a friendly, age-appropriate persona.
+/// Builds the system instruction. Persona is fixed; the language clause
+/// is templated because the Live API drifts to other languages without an
+/// explicit pin (see issue #1). `main` is required, `alternative` is
+/// optional — when present the prompt lets the model match whichever the
+/// child just spoke.
+///
 /// This is the only safety lever the Live API gives us — `safetySettings`
 /// is a REST-only field and `BidiGenerateContentSetup` rejects it. Hard
 /// thresholds therefore fall back to Gemini's built-in defaults; see
 /// `docs/v0.1-design.md` for the trade-off.
-const SYSTEM_INSTRUCTION: &str = concat!(
-    "You are a kind, patient voice assistant for a child. ",
-    "Speak in short, simple sentences. ",
-    "Refuse violent, sexual, or self-harm content gently and redirect to a positive topic. ",
-    "Never tell the child to hurt themselves or anyone else. ",
-    "If you don't know something, say so."
-);
+fn build_system_instruction(main: &str, alternative: Option<&str>) -> String {
+    let language_clause = match alternative {
+        Some(alt) if !alt.is_empty() && alt != main => format!(
+            "Always reply in {main} or {alt}, matching whichever language the child just spoke. \
+             Never reply in any other language."
+        ),
+        _ => format!(
+            "Always reply in {main}. Never reply in any other language, even if the child's words sound like another language."
+        ),
+    };
+    format!(
+        "You are a kind, patient voice assistant for a child. \
+         {language_clause} \
+         Speak in short, simple sentences. \
+         Refuse violent, sexual, or self-harm content gently and redirect to a positive topic. \
+         Never tell the child to hurt themselves or anyone else. \
+         If you don't know something, say so."
+    )
+}
 
 /// Events emitted to the audio layer / session recorder. Lifecycle is
 /// intentionally narrow — anything richer (transcripts, tool calls)
@@ -146,6 +163,8 @@ impl GeminiSession {
     pub fn start(
         api_key: String,
         model: String,
+        main_language: String,
+        alternative_language: Option<String>,
         sink: Arc<dyn EventSink>,
     ) -> Result<Self, GeminiError> {
         if api_key.is_empty() {
@@ -180,6 +199,8 @@ impl GeminiSession {
                 rt.block_on(run_session(
                     api_key,
                     model,
+                    main_language,
+                    alternative_language,
                     upload_rx,
                     sink_thread,
                     shutdown_thread,
@@ -419,6 +440,8 @@ fn ensure_crypto_provider() {
 async fn run_session(
     api_key: String,
     model: String,
+    main_language: String,
+    alternative_language: Option<String>,
     mut upload_rx: mpsc::UnboundedReceiver<UploadItem>,
     sink: Arc<dyn EventSink>,
     shutdown: Arc<AtomicBool>,
@@ -467,6 +490,8 @@ async fn run_session(
     let (mut writer, mut reader) = ws.split();
 
     // Send setup as the first message.
+    let system_instruction =
+        build_system_instruction(&main_language, alternative_language.as_deref());
     let setup = SetupEnvelope {
         setup: Setup {
             model: &model,
@@ -475,7 +500,7 @@ async fn run_session(
             },
             system_instruction: SystemInstruction {
                 parts: vec![TextPart {
-                    text: SYSTEM_INSTRUCTION,
+                    text: &system_instruction,
                 }],
             },
             realtime_input_config: RealtimeInputConfig {
@@ -851,10 +876,48 @@ mod tests {
     #[test]
     fn no_api_key_rejected_before_thread_spawn() {
         let sink: Arc<dyn EventSink> = Arc::new(|_| {});
-        match GeminiSession::start(String::new(), DEFAULT_MODEL.into(), sink) {
+        match GeminiSession::start(
+            String::new(),
+            DEFAULT_MODEL.into(),
+            "English".into(),
+            None,
+            sink,
+        ) {
             Err(GeminiError::NoApiKey) => {}
             Err(e) => panic!("expected NoApiKey, got {e:?}"),
             Ok(_) => panic!("expected NoApiKey, got Ok"),
         }
+    }
+
+    #[test]
+    fn system_instruction_pins_single_language() {
+        let s = build_system_instruction("English", None);
+        assert!(s.contains("Always reply in English"));
+        assert!(s.contains("Never reply in any other language"));
+        // No "or" clause when alternative is missing.
+        assert!(!s.contains("English or "));
+    }
+
+    #[test]
+    fn system_instruction_allows_either_when_alt_set() {
+        let s = build_system_instruction("English", Some("Mandarin Chinese"));
+        assert!(s.contains("Always reply in English or Mandarin Chinese"));
+        assert!(s.contains("matching whichever language the child just spoke"));
+    }
+
+    #[test]
+    fn system_instruction_collapses_alt_equal_to_main() {
+        // Same string for both is a user-input quirk, not an error. Fall
+        // back to the single-language form so the prompt doesn't say
+        // "English or English".
+        let s = build_system_instruction("English", Some("English"));
+        assert!(s.contains("Always reply in English."));
+        assert!(!s.contains("English or English"));
+    }
+
+    #[test]
+    fn system_instruction_treats_empty_alt_as_none() {
+        let s = build_system_instruction("English", Some(""));
+        assert!(s.contains("Always reply in English."));
     }
 }

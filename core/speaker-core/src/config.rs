@@ -173,6 +173,17 @@ pub struct Settings {
     /// v0.4 N1.
     #[serde(default = "default_auto_session_on_bt_connect")]
     pub auto_session_on_bt_connect: bool,
+    /// Primary language the model should reply in. Free-text name
+    /// templated into the system instruction (e.g., "English",
+    /// "Mandarin Chinese"). Issue #1: without an explicit pin the
+    /// model occasionally drifts to a language the child didn't speak.
+    #[serde(default = "default_main_language")]
+    pub main_language: String,
+    /// Optional secondary language. When set, the prompt allows the
+    /// model to reply in either main or alternative depending on which
+    /// the child just spoke. `None` keeps the prompt single-language.
+    #[serde(default)]
+    pub alternative_language: Option<String>,
 }
 
 fn default_model() -> String {
@@ -191,6 +202,10 @@ fn default_auto_session_on_bt_connect() -> bool {
     true
 }
 
+fn default_main_language() -> String {
+    "English".to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -203,6 +218,8 @@ impl Default for Settings {
             force_default_output: false,
             responder: ResponderKind::default(),
             auto_session_on_bt_connect: default_auto_session_on_bt_connect(),
+            main_language: default_main_language(),
+            alternative_language: None,
         }
     }
 }
@@ -284,6 +301,8 @@ mod tests {
             force_default_output: true,
             responder: ResponderKind::Nope,
             auto_session_on_bt_connect: false,
+            main_language: "Mandarin Chinese".into(),
+            alternative_language: Some("English".into()),
         };
         let text = toml::to_string_pretty(&s).unwrap();
         let parsed: Settings = toml::from_str(&text).unwrap();
@@ -350,6 +369,22 @@ force_default_output = false
         )
         .unwrap();
         assert!(parsed.auto_session_on_bt_connect);
+    }
+
+    #[test]
+    fn language_defaults_for_older_configs() {
+        // Pre-issue-#1 configs predate the language fields — `#[serde(default
+        // = "...")]` upgrades them to "English" main / no alternative,
+        // matching the prior implicit single-language behavior.
+        let parsed: Settings = toml::from_str(
+            r#"
+target_address = "aa:bb:cc:dd:ee:ff"
+model = "models/gemini-test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.main_language, "English");
+        assert_eq!(parsed.alternative_language, None);
     }
 
     #[test]

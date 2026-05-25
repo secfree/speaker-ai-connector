@@ -179,7 +179,9 @@ char *speaker_core_coord_simulate_disconnect(void);
 //     "silence_timeout_ms": 700,
 //     "force_default_output": false,
 //     "responder": "Gemini" | "Nope",
-//     "auto_session_on_bt_connect": true }       (v0.4 N1)
+//     "auto_session_on_bt_connect": true,        (v0.4 N1)
+//     "main_language": "English",                (issue #1)
+//     "alternative_language": "Mandarin Chinese" | null }
 char *speaker_core_settings_get(void);
 
 // All setters persist to TOML and refresh the coordinator's cached
@@ -204,5 +206,11 @@ int speaker_core_settings_set_vad_threshold(unsigned short value);
 // behavior; 0 skips the auto-launch so the speaker can be used just for
 // music. The menu-bar Start-session item still works manually.
 int speaker_core_settings_set_auto_session_on_bt_connect(unsigned char enabled);
+// Issue #1: language pinning for the Gemini system instruction. Main is
+// required (rejects null/empty with -100). Alternative is optional —
+// pass NULL or empty to clear, which drops the "or alternative" clause
+// from the prompt.
+int speaker_core_settings_set_main_language(const char *language);
+int speaker_core_settings_set_alternative_language(const char *language); // NULL clears
 
 #endif

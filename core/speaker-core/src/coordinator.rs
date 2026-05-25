@@ -630,6 +630,8 @@ impl Coordinator {
                 ResponderInit::Gemini {
                     api_key,
                     model: settings.model.clone(),
+                    main_language: settings.main_language.clone(),
+                    alternative_language: settings.alternative_language.clone(),
                 }
             }
             ResponderKind::Nope => ResponderInit::Nope,

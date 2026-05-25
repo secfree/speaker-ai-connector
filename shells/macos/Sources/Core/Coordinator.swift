@@ -171,6 +171,8 @@ private struct SettingsPayload: Decodable {
     let forceDefaultOutput: Bool
     let responder: String?
     let autoSessionOnBtConnect: Bool?
+    let mainLanguage: String?
+    let alternativeLanguage: String?
 
     enum CodingKeys: String, CodingKey {
         case targetAddress = "target_address"
@@ -182,6 +184,8 @@ private struct SettingsPayload: Decodable {
         case forceDefaultOutput = "force_default_output"
         case responder
         case autoSessionOnBtConnect = "auto_session_on_bt_connect"
+        case mainLanguage = "main_language"
+        case alternativeLanguage = "alternative_language"
     }
 }
 
@@ -352,6 +356,15 @@ final class Coordinator: ObservableObject {
     @Published var autoSessionOnBtConnect: Bool {
         didSet { if oldValue != autoSessionOnBtConnect { persistAutoSessionOnBtConnect() } }
     }
+    /// Primary language pinned in the Gemini system instruction. Issue #1.
+    @Published var mainLanguage: String {
+        didSet { if oldValue != mainLanguage { persistMainLanguage() } }
+    }
+    /// Optional secondary language. Empty string means "no alternative",
+    /// matching the core's `Option<String>` (None on the wire). Issue #1.
+    @Published var alternativeLanguage: String {
+        didSet { if oldValue != alternativeLanguage { persistAlternativeLanguage() } }
+    }
 
     let watcher = BluetoothWatcher()
 
@@ -385,6 +398,8 @@ final class Coordinator: ObservableObject {
         self.model = ""
         self.responder = .gemini
         self.autoSessionOnBtConnect = true
+        self.mainLanguage = "English"
+        self.alternativeLanguage = ""
         apiKeyStored = (speaker_core_api_key_has() == 1)
         loadSettings()
         loginItemEnabled = LoginItem.isEnabled()
@@ -420,6 +435,13 @@ final class Coordinator: ObservableObject {
             if let auto = p.autoSessionOnBtConnect {
                 self.autoSessionOnBtConnect = auto
             }
+            if let main = p.mainLanguage, !main.isEmpty {
+                self.mainLanguage = main
+            }
+            // Empty / nil in the payload both map to "no alternative" — the
+            // core stores `Option<String>` and SwiftUI binds against a
+            // non-optional empty-string convention.
+            self.alternativeLanguage = p.alternativeLanguage ?? ""
             // Push the loaded target into the BT watcher so events get
             // filtered correctly from first launch.
             watcher.targetAddress = p.targetAddress
@@ -485,6 +507,24 @@ final class Coordinator: ObservableObject {
         guard !loadingSettings else { return }
         let rc = speaker_core_settings_set_auto_session_on_bt_connect(autoSessionOnBtConnect ? 1 : 0)
         if rc != 0 { log.error("settings_set_auto_session_on_bt_connect failed: \(rc)") }
+    }
+
+    private func persistMainLanguage() {
+        guard !loadingSettings else { return }
+        guard !mainLanguage.isEmpty else { return }
+        let rc = mainLanguage.withCString { speaker_core_settings_set_main_language($0) }
+        if rc != 0 { log.error("settings_set_main_language failed: \(rc)") }
+    }
+
+    private func persistAlternativeLanguage() {
+        guard !loadingSettings else { return }
+        let rc: Int32
+        if alternativeLanguage.isEmpty {
+            rc = speaker_core_settings_set_alternative_language(nil)
+        } else {
+            rc = alternativeLanguage.withCString { speaker_core_settings_set_alternative_language($0) }
+        }
+        if rc != 0 { log.error("settings_set_alternative_language failed: \(rc)") }
     }
 
     // --- API key (M5) -----------------------------------------------

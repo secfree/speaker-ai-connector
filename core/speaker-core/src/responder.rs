@@ -62,7 +62,12 @@ impl ResponderKind {
 /// before calling `start_session`, capturing the responder choice at
 /// launch time.
 pub enum ResponderInit {
-    Gemini { api_key: String, model: String },
+    Gemini {
+        api_key: String,
+        model: String,
+        main_language: String,
+        alternative_language: Option<String>,
+    },
     Nope,
 }
 
@@ -89,9 +94,13 @@ impl ResponderSession {
     /// land here as `GeminiError`).
     pub fn start(init: ResponderInit, sink: Arc<dyn EventSink>) -> Result<Self, GeminiError> {
         match init {
-            ResponderInit::Gemini { api_key, model } => {
-                GeminiSession::start(api_key, model, sink).map(ResponderSession::Gemini)
-            }
+            ResponderInit::Gemini {
+                api_key,
+                model,
+                main_language,
+                alternative_language,
+            } => GeminiSession::start(api_key, model, main_language, alternative_language, sink)
+                .map(ResponderSession::Gemini),
             ResponderInit::Nope => Ok(ResponderSession::Nope),
         }
     }
@@ -197,6 +206,8 @@ mod tests {
         let g = ResponderInit::Gemini {
             api_key: "key".into(),
             model: "models/test".into(),
+            main_language: "English".into(),
+            alternative_language: None,
         };
         assert_eq!(g.kind(), ResponderKind::Gemini);
         assert_eq!(ResponderInit::Nope.kind(), ResponderKind::Nope);

@@ -469,9 +469,12 @@ pub extern "C" fn speaker_core_manual_session_start(
                     return e.code();
                 }
             };
+            let settings = Settings::current();
             ResponderInit::Gemini {
                 api_key,
                 model: model_str,
+                main_language: settings.main_language,
+                alternative_language: settings.alternative_language,
             }
         }
         ResponderKind::Nope => ResponderInit::Nope,
@@ -821,6 +824,52 @@ pub extern "C" fn speaker_core_settings_set_auto_session_on_bt_connect(enabled: 
 #[no_mangle]
 pub extern "C" fn speaker_core_settings_set_force_default_output(enabled: i32) -> i32 {
     match Settings::update(|s| s.force_default_output = enabled != 0) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Primary language the model replies in. Free-text name (e.g. "English",
+/// "Mandarin Chinese") — templated into the Gemini system instruction.
+/// Empty / null is rejected; the persona requires a language to pin.
+/// Returns 0 on success, `-100` for an invalid argument, otherwise a
+/// negative `ConfigError::code()`. Issue #1.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_main_language(language: *const c_char) -> i32 {
+    if language.is_null() {
+        return -100;
+    }
+    let value = match unsafe { CStr::from_ptr(language) }.to_str() {
+        Ok(s) if !s.is_empty() => s.to_string(),
+        _ => return -100,
+    };
+    match Settings::update(|s| s.main_language = value) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Optional secondary language. Pass null or empty to clear, in which
+/// case the prompt drops the "or alternative" clause. Returns 0 on
+/// success or a negative `ConfigError::code()`. Issue #1.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_alternative_language(language: *const c_char) -> i32 {
+    let value = if language.is_null() {
+        None
+    } else {
+        match unsafe { CStr::from_ptr(language) }.to_str() {
+            Ok(s) if !s.is_empty() => Some(s.to_string()),
+            Ok(_) => None,
+            Err(_) => return -100,
+        }
+    };
+    match Settings::update(|s| s.alternative_language = value) {
         Ok(_) => {
             Coordinator::instance().refresh_settings();
             0
