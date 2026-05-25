@@ -194,25 +194,36 @@ active_in:  Option<ActiveClip>,
 active_out: Option<ActiveClip>,
 ```
 
-The two slots are independent. Inside a single session you can have **both
-an `In` and an `Out` clip open at the same time** — e.g. while the model is
-still bursting (`Out` open) the user starts speaking and VAD opens
-(`In` open). Each direction is finalised on its own `end_clip` call.
+The two slots are independent and each direction is finalised on its own
+`end_clip` call.
 
-This is **the relevant fix for the echo-loop / 1007 bug**. The original
-design had a single `active_clip: Option<ActiveClip>` slot, which forced
-serial In→Out→In→Out access and produced two confusing failure modes:
+**In normal operation the slots are used serially.** The turn shape is
+`In open → In close → activityEnd → Out open → Out close → tail → next In`.
+The echo guard (see below) drops mic frames before VAD whenever `Out` is
+open or the tail is still active, so VAD cannot fire `Opened` and the
+audio path will not call `begin_clip(In)` while an `Out` clip is live.
+The echo guard is the real serializer between directions.
 
-1. `begin_clip(In) failed: ActiveClipExists` — happened when the audio
-   path tried to open an `In` clip while the Gemini sink was mid-burst with
-   an `Out` clip already open.
-2. `write_frames(In) failed: NoActiveClip` — same window, downstream effect.
-   The recorder returned `NoActiveClip` whenever the requested direction
-   didn't match the active slot's direction. So an `In` write while `Out`
-   was active looked identical to "no clip at all".
+The split slots are **defense-in-depth** against the original
+single-slot design. That design had one `active_clip: Option<ActiveClip>`
+slot, which produced two confusing failure modes whenever the
+serialization assumption broke (early builds without the echo guard, or
+sub-millisecond races around `out_clip_open` being set):
 
-With the split slots both go away: `begin_clip(In)` while `Out` is open
-succeeds, and `write_frames(In)` is checked against the In slot only.
+1. `begin_clip(In) failed: ActiveClipExists` — the audio path tried to
+   open an `In` clip while the Gemini sink was mid-burst with an `Out`
+   clip already open.
+2. `write_frames(In) failed: NoActiveClip` — same window, downstream
+   effect. The recorder returned `NoActiveClip` whenever the requested
+   direction didn't match the active slot's direction, so an `In` write
+   while `Out` was active looked identical to "no clip at all".
+
+With the split slots both failure modes are structurally impossible:
+`begin_clip(In)` while `Out` is open would succeed, and `write_frames(In)`
+is checked against the In slot only. In practice the echo guard means
+we never exercise this path — but if a future build removes or relaxes
+the guard (e.g. once AEC lands and barge-in is allowed), the recorder
+no longer needs to change.
 
 ### Sequence numbers
 
