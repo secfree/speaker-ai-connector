@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Host, SampleFormat, SampleRate, Stream, StreamConfig, SupportedStreamConfig};
+use cpal::{Device, Host, SampleFormat, SampleRate, Stream, StreamConfig, StreamError, SupportedStreamConfig};
 
 use crate::gemini::{
     EventSink, GeminiError, GeminiEvent, INPUT_SAMPLE_RATE, OUTPUT_SAMPLE_RATE,
@@ -955,6 +955,7 @@ pub fn start_session(
     let mut out_prev: f32 = 0.0;
     let mut out_next: f32 = 0.0;
     let mut out_frac: f64 = 1.0;
+    let dead_for_out_err = session_dead.clone();
     let output_stream = output_device
         .build_output_stream(
             &out_stream_cfg,
@@ -978,7 +979,16 @@ pub fn start_session(
                     out_frac += out_step;
                 }
             },
-            |err| eprintln!("speaker-core: manual output stream error: {err}"),
+            move |err| {
+                eprintln!("speaker-core: manual output stream error: {err}");
+                // BT speaker powered off → CoreAudio fails the stream with
+                // DeviceNotAvailable. IOBluetooth's disconnect notification
+                // can lag by tens of seconds, so the stream-error signal is
+                // our fastest cue to tear the session down (issue #5).
+                if matches!(err, StreamError::DeviceNotAvailable) {
+                    schedule_manual_teardown(&dead_for_out_err);
+                }
+            },
             None,
         )
         .map_err(|e| AudioError::StreamBuildFailed(format!("manual output: {e}")))?;
@@ -1008,6 +1018,7 @@ pub fn start_session(
     // the recorder below.
     let upload_handle = responder_session.upload_handle();
     let dead_for_input = session_dead.clone();
+    let dead_for_input_err = session_dead.clone();
     let out_clip_for_input = out_clip_open.clone();
     let play_out_for_input = play_out_until_ns.clone();
     // Latches on first SendError so we log "upload channel closed" once
@@ -1152,7 +1163,16 @@ pub fn start_session(
                     }
                 }
             },
-            |err| eprintln!("speaker-core: manual input stream error: {err}"),
+            move |err| {
+                eprintln!("speaker-core: manual input stream error: {err}");
+                // Mirror of the output-side handler: when the BT mic
+                // disappears (speaker powered off), CoreAudio fails the
+                // input stream before IOBluetooth's disconnect lands, so
+                // tear the session down on this signal too (issue #5).
+                if matches!(err, StreamError::DeviceNotAvailable) {
+                    schedule_manual_teardown(&dead_for_input_err);
+                }
+            },
             None,
         )
         .map_err(|e| AudioError::StreamBuildFailed(format!("manual input: {e}")))?;

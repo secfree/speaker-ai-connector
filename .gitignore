@@ -19,3 +19,4 @@ core/target/
 
 # macOS
 .DS_Store
+.context/
