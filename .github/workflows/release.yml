@@ -1,0 +1,143 @@
+# Builds an unsigned (ad-hoc-signed) release .zip of the macOS app and
+# attaches it to a GitHub Release.
+#
+# This project does not pay for an Apple Developer Program membership, so
+# the artifact is NOT notarized. Users will need to clear the quarantine
+# attribute on first launch — see the README's "Install" section.
+#
+# Triggered by pushing a `v*` tag (e.g. `git tag v0.1.0 && git push --tags`)
+# or manually via the Actions tab.
+
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish (must already exist, or one will be created from the current commit)."
+        required: true
+        type: string
+
+permissions:
+  contents: write  # needed for `gh release create`
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            core/target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('core/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build Rust core (release)
+        working-directory: core
+        run: cargo build --release
+
+      - name: Generate Xcode project
+        working-directory: shells/macos
+        run: xcodegen generate
+
+      - name: Build macOS app (Release)
+        working-directory: shells/macos
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project SpeakerAIConnector.xcodeproj \
+            -scheme SpeakerAIConnector \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Ad-hoc sign the .app
+        # Ad-hoc signing (`--sign -`) does NOT make Gatekeeper trust the app,
+        # but it stabilizes the bundle hash so the user's "broken signature"
+        # error is the clean quarantine one (fixable with `xattr`) rather
+        # than the messier "code object is not signed at all".
+        working-directory: shells/macos/build/Build/Products/Release
+        run: |
+          set -euo pipefail
+          codesign --force --deep --sign - SpeakerAIConnector.app
+          codesign --verify --deep --strict --verbose=2 SpeakerAIConnector.app
+
+      - name: Zip the .app
+        working-directory: shells/macos/build/Build/Products/Release
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent SpeakerAIConnector.app \
+            "SpeakerAIConnector-${TAG}.zip"
+          shasum -a 256 "SpeakerAIConnector-${TAG}.zip" \
+            > "SpeakerAIConnector-${TAG}.zip.sha256"
+
+      - name: Upload build artifact (for inspection if release step fails)
+        uses: actions/upload-artifact@v4
+        with:
+          name: SpeakerAIConnector-${{ env.TAG }}
+          path: |
+            shells/macos/build/Build/Products/Release/SpeakerAIConnector-*.zip
+            shells/macos/build/Build/Products/Release/SpeakerAIConnector-*.zip.sha256
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: shells/macos/build/Build/Products/Release
+        run: |
+          set -euo pipefail
+          NOTES=$(cat <<EOF
+          Unsigned macOS build of Speaker AI Connector ${TAG}.
+
+          **First-launch instructions** (required — the app is not notarized):
+
+          \`\`\`sh
+          # After unzipping into /Applications:
+          xattr -dr com.apple.quarantine /Applications/SpeakerAIConnector.app
+          \`\`\`
+
+          Then open the app from /Applications. See the README for the full
+          install + first-run walkthrough and why this app isn't signed.
+
+          SHA-256 of the zip:
+          \`\`\`
+          $(cat SpeakerAIConnector-${TAG}.zip.sha256)
+          \`\`\`
+          EOF
+          )
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" \
+              "SpeakerAIConnector-${TAG}.zip" \
+              "SpeakerAIConnector-${TAG}.zip.sha256" \
+              --clobber
+          else
+            gh release create "${TAG}" \
+              "SpeakerAIConnector-${TAG}.zip" \
+              "SpeakerAIConnector-${TAG}.zip.sha256" \
+              --title "${TAG}" \
+              --notes "${NOTES}"
+          fi

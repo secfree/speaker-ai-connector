@@ -32,6 +32,20 @@ You bring your own **Gemini API key** (stored in the macOS Keychain). The VAD ga
 
 This app records audio. Every VAD-gated input utterance and every Gemini Live response is written as a WAV clip to `~/Library/Application Support/SpeakerAIConnector/sessions/<session-id>/` on your Mac. Nothing is uploaded anywhere except to Google's Gemini Live endpoint, which receives the gated input PCM in real time for as long as a session is active. There is no telemetry, no analytics, no third-party services beyond Google. There is also no automatic retention cap in v0.1 — recordings stay until you delete them; the settings window has a "Reveal Sessions Folder" action.
 
+## Install
+
+Grab the latest `SpeakerAIConnector-vX.Y.Z.zip` from the [Releases page](https://github.com/secfree/speaker-ai-connector/releases), unzip it, and drag `SpeakerAIConnector.app` into `/Applications`.
+
+**Then run this once before opening it:**
+
+```sh
+xattr -dr com.apple.quarantine /Applications/SpeakerAIConnector.app
+```
+
+Why? The release build is **not signed by Apple** — I don't pay the $99/yr Developer Program fee for a hobby project. Without that, macOS Gatekeeper quarantines downloaded apps and refuses to launch them with a misleading *"SpeakerAIConnector is damaged and can't be opened"* error. The `xattr` command removes the quarantine flag macOS attached when your browser saved the zip; the app itself is fine. The release zips are built in the open by [`.github/workflows/release.yml`](.github/workflows/release.yml) from a tagged commit, and each release lists the SHA-256 of the zip so you can verify what you downloaded matches what CI produced.
+
+If you'd rather not run that command, build from source — same binary, no quarantine flag.
+
 ## Build from source
 
 Requires Xcode 15+ on macOS 14+, [XcodeGen](https://github.com/yonaskolb/XcodeGen), and a Rust toolchain (stable ≥ 1.75).
@@ -50,8 +64,6 @@ open shells/macos/SpeakerAIConnector.xcodeproj
 ```
 
 Press ⌘R in Xcode to run. The app has no Dock icon — look for the speaker icon in the menu bar.
-
-A prebuilt signed/notarized release will be published on the GitHub Releases page; until then, building from source is the only option.
 
 ## First run
 
