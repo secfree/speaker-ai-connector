@@ -22,7 +22,7 @@ See [docs/design-v0.1.md](docs/design-v0.1.md) for the architecture deep dive, a
 
 You need an **HFP/HSP Bluetooth speaker with a working mic** (i.e. a speakerphone-class device). A2DP-only speakers are an explicit non-goal — without an HFP mic profile macOS exposes, there is nothing for the app to capture.
 
-Speaker auto-reconnect reliability is a Bluetooth-stack problem outside this app's control. A tested-models list will land alongside the public launch.
+Speaker auto-reconnect reliability is a Bluetooth-stack problem outside this app's control. See [docs/tested-speakers.md](docs/tested-speakers.md) for models that have been verified to work end-to-end, and feel free to add yours.
 
 ## Cost
 
