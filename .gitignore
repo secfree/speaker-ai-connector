@@ -23,3 +23,10 @@ core/target/
 # AI
 .claude/
 .context/
+
+# Secrets (defensive — none of these are expected in-tree)
+*.env
+.env
+.env.*
+*.pem
+*.key
