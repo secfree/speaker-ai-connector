@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Early implementation. The repo contains [docs/v0.1-design.md](docs/v0.1-design.md), a Rust workspace under `core/`, and the macOS shell skeleton under `shells/macos/` (XcodeGen `project.yml` + SwiftUI app shell + Bluetooth watcher + placeholder Coordinator/Settings). No `.xcodeproj` is checked in — run `xcodegen generate` inside `shells/macos/` to produce it. The design doc is the source of truth for scope and architecture; read it before making non-trivial changes.
+v0.1 (M1–M6) is shipped: Rust core, macOS Bluetooth watcher, `cpal` audio capture + playback, VAD relay (WebRTC + Silero, Silero default since v0.3), Gemini Live WebSocket client with Keychain-backed API key, hand-written C ABI FFI, persisted TOML config, `SMAppService` login item, full Coordinator state machine driven from the shell, and per-session recordings browsable in a Sessions window. v0.2 added session delete, a live dialogue window for manual sessions, and a pluggable responder (Gemini / Nope). v0.3 added the Silero VAD engine behind a `Vad` seam and made it the default. v0.4 added an auto-session-on-BT-connect toggle and date-grouped sessions. **M7 on-hardware polish is the remaining v0.1 milestone** — most of its tasks are still `todo` in [docs/roadmap-v0.1.md](docs/roadmap-v0.1.md). No `.xcodeproj` is checked in — `make build` (or `xcodegen generate` inside `shells/macos/`) produces it. [docs/design-v0.1.md](docs/design-v0.1.md) is the source of truth for scope and architecture; read it before making non-trivial changes, and check the `docs/roadmap-v0.*.md` files for execution state.
 
 ## Project
 
@@ -16,7 +16,7 @@ The design supports macOS and Windows, but **v0.1 ships macOS only**. The Window
 
 ### v1 path: Gemini Live (no browser)
 
-The design's [roadmap](docs/v0.1-design.md#roadmap) makes **Gemini Live the primary v1 path**. The Mac captures audio from the speaker's HFP mic, streams it to Gemini Live over a WebSocket, and plays the response audio back through the speaker. A local VAD (WebRTC VAD via `libfvad`) gates uploads so silence costs nothing. No browser, no selectors, no cookies.
+The design's [roadmap](docs/design-v0.1.md#roadmap) makes **Gemini Live the primary v1 path**. The Mac captures audio from the speaker's HFP mic, streams it to Gemini Live over a WebSocket, and plays the response audio back through the speaker. A local VAD (Silero by default, WebRTC via `libfvad` as a no-model fallback) gates uploads so silence costs nothing. No browser, no selectors, no cookies.
 
 The older browser-automation path (open `chatgpt.com` in Safari, click the voice button via injected JS) is now **Phase 3** in the design and is deferred indefinitely — Anthropic not shipping a realtime voice API is the only remaining reason to keep it on the map.
 
@@ -32,20 +32,29 @@ core/                                Rust workspace (shared, platform-neutral)
     src/
       lib.rs                         re-exports
       coordinator.rs                 state machine (BTEvent → StatusEvent)
-      audio.rs                       cpal capture + playback         (M2)
-      vad.rs                         libfvad relay                   (M3)
-      gemini.rs                      Gemini Live WebSocket client    (M4)
-      config.rs                      TOML + OS credential store      (M5)
-      ffi.rs                         C ABI surface to the shells
+      audio.rs                       cpal capture + playback
+      vad.rs                         Vad seam + WebRTC engine + Gate
+      vad_silero.rs                  Silero ONNX engine (feature = "silero")
+      gemini.rs                      Gemini Live WebSocket client
+      responder.rs                   Responder enum (Gemini / Nope)
+      sessions.rs                    SessionRecorder + on-disk manifests
+      routing.rs                     CoreAudio force-default-output (macOS)
+      config.rs                      TOML + Keychain via keyring
+      last_error.rs                  async error surface for the shell to poll
+      ffi.rs                         hand-written C ABI to the shells
 
 shells/
   macos/                             SwiftUI menu-bar app
     project.yml                      XcodeGen
+    Resources/                       silero_vad.onnx + fetch-silero.sh
     Sources/
-      App/                           Info.plist, entitlements, @main
+      App/                           Info.plist, entitlements, @main,
+                                     bridging header, SileroModelLoader
       Bluetooth/                     IOBluetooth watcher (platform code)
-      Core/                          Swift mirror of StatusEvent (M1 placeholder)
-      UI/                            SettingsView
+      Core/                          Coordinator (FFI client), LoginItem,
+                                     SessionsStore
+      UI/                            SettingsView, SessionsView
+                                     (DialogueView lives in SessionsView.swift)
   windows/                           next version — do not create yet
 ```
 
@@ -53,38 +62,40 @@ shells/
 
 **Two-layer split:** a shared Rust core + a thin native shell per platform. v0.1 ships the macOS shell only.
 
-The shell owns: the menu-bar surface, the settings window, OS permission prompts, autostart (`SMAppService`), and the Bluetooth event source (`IOBluetooth` — the WinRT equivalent ships with the Windows shell later). The core owns: the coordinator state machine, the audio pipeline, the VAD relay, the Gemini Live client, and config persistence. Audio stays inside the core — raw PCM does not cross the FFI line.
+The shell owns: the menu-bar surface, the settings + sessions + dialogue windows, OS permission prompts, autostart (`SMAppService`), Silero model bundling (the shell passes the bundled `.onnx` path to the core at startup), and the Bluetooth event source (`IOBluetooth` — the WinRT equivalent ships with the Windows shell later). The core owns: the coordinator state machine, the audio pipeline, the VAD relay, the Gemini Live client, the session recorder, and config persistence. Audio stays inside the core — raw PCM does not cross the FFI line.
 
-FFI surface is intentionally small: `BTEvent` in, `StatusEvent` out, plus a handful of config getters/setters. Strategy is hand-written C ABI or `uniffi` / `swift-bridge` — picked in M5 when the real surface lands. M1 only exposes `speaker_core_version()` to prove the link works.
+FFI is a hand-written C ABI (decided in M6 — surface is ~25 functions, codegen wasn't worth the build cost). The shape: `BTEvent` in, `SessionCommand::{Start, Stop}` in, `StatusEvent` out as a JSON snapshot polled by the shell on a revision counter, plus typed config getters/setters and a `speaker_core_string_free`. File paths (session clips) cross; PCM never does.
 
 ### Components
 
-1. **Bluetooth watcher** — `shells/macos/Sources/Bluetooth/BluetoothWatcher.swift`. `IOBluetoothDevice` connect/disconnect notifications, filtered by the configured target address, debounced (debounce moves to the Rust core once FFI lands). Yields `BTEvent`s on an `AsyncStream`. Only watches already-paired devices. Stays in the shell — `IOBluetooth` is Apple-only and doesn't generalize.
-2. **Audio pipeline** (planned, `core/speaker-core/src/audio.rs`) — `cpal` capture from the default input (the speaker's HFP mic) and playback to the default output. 16 kHz mono `i16`. Optional CoreAudio force-default-output helper for speakers macOS doesn't auto-route.
-3. **VAD relay** (planned, `core/speaker-core/src/vad.rs`) — wraps `libfvad`. Gates the upload stream so silence forwards no frames; speech opens the gate with a small pre-roll, sustained silence closes it.
-4. **Gemini Live client** (planned, `core/speaker-core/src/gemini.rs`) — `tokio` + `tokio-tungstenite` to the Live endpoint. Streams gated PCM up, plays response audio down.
-5. **Coordinator** (`core/speaker-core/src/coordinator.rs`) — owns the session state machine. M1 has the type shape; lifecycle wires up in M4/M5. The Swift `Coordinator` in `shells/macos/Sources/Core/` is a temporary M1 placeholder that mirrors the Rust types so the cutover in M5 is mechanical.
-6. **Settings** (`shells/macos/Sources/UI/SettingsView.swift` + planned `core/speaker-core/src/config.rs`) — paired-device picker, API key (OS credential store via `keyring`), Gemini model, VAD sensitivity, silence timeout, force-default-output toggle, start-at-login.
+1. **Bluetooth watcher** — `shells/macos/Sources/Bluetooth/BluetoothWatcher.swift`. `IOBluetoothDevice` connect/disconnect notifications for paired devices, forwarded to the core. Debounce lives in the core (`Coordinator::handle_bt`, 5 s default).
+2. **Audio pipeline** — `core/speaker-core/src/audio.rs`. `cpal` capture from the default input (the speaker's HFP mic) and playback to the default output. Device-native f32 in/out with downmix-to-mono and a linear-interpolation resampler to the 16 kHz mono `i16` contract for Gemini Live. Optional CoreAudio force-default-output helper (`routing.rs`) behind a settings toggle.
+3. **VAD relay** — `core/speaker-core/src/vad.rs` + `vad_silero.rs`. `VadEngine` enum dispatch: `WebRtc` (via the `fvad` crate / `libfvad`) and `Silero` (via `ort` + bundled `silero_vad.onnx` v5). Shared `Gate` (pre-roll + hangover) sits in front of the engines. Silero is the default; WebRTC is the no-model fallback.
+4. **Gemini Live client** — `core/speaker-core/src/gemini.rs`. `tokio` + `tokio-tungstenite` to the Live endpoint with `?key=` URL auth. Setup includes all four harm categories at `BLOCK_LOW_AND_ABOVE` plus a short friendly system instruction. Streams gated PCM up, plays response audio down. Typed error enum (`NoApiKey`, `AuthFailed`, `Network`, `SafetyBlocked`, `Other`) — connect-time errors are synchronous; async errors land in `last_error::set` for the shell to poll.
+5. **Responder seam** — `core/speaker-core/src/responder.rs`. `ResponderSession` enum wraps Gemini and `Nope` (consumes input frames, produces no output — useful for testing the voice input path without spending API credits). Picked over `dyn Responder` because the audio callback's `Send` constraints already complicate trait objects and per-frame cost matters at 16 kHz.
+6. **Coordinator** — `core/speaker-core/src/coordinator.rs`. Owns the session state machine: `Idle → Launching → SessionActive → TearingDown → Idle`, driven by `BTEvent`s and `SessionCommand`s. Async transitions run on a background thread; a revision counter lets the shell skip JSON decode when nothing changed. The Swift `Coordinator` in `shells/macos/Sources/Core/Coordinator.swift` is no longer a placeholder — it forwards BT events, polls the status snapshot, and reads/writes settings through FFI.
+7. **Session recorder** — `core/speaker-core/src/sessions.rs`. Writes `manifest.json` + `<seq>-<in|out>.wav` clip files under `~/Library/Application Support/SpeakerAIConnector/sessions/<session-id>/`. Lifecycle is wired to the coordinator state machine. Per-clip events flow through the status snapshot so the dialogue window can render a live transcript.
+8. **Settings** — `shells/macos/Sources/UI/SettingsView.swift` + `core/speaker-core/src/config.rs`. Non-secret config in TOML under `~/Library/Application Support/SpeakerAIConnector/config.toml`. API key in the macOS Keychain via `keyring`. Settings include: paired device, Gemini model, responder choice (Gemini / Nope), VAD engine (WebRTC / Silero) + per-engine tuning, silence timeout, force-default-output toggle, start-at-login, auto-session-on-BT-connect, language pair.
+9. **Sessions + Dialogue UI** — `shells/macos/Sources/UI/SessionsView.swift`. Sessions window with multi-select delete and date-grouped headers; clicking a clip plays it via `AVAudioPlayer`. The dialogue window (id `"dialogue"`) opens automatically when a manual session starts and renders the live transcript via the per-clip events on the status snapshot.
 
-Non-secret config lives in a TOML file under `~/Library/Application Support/SpeakerAIConnector/` (via the `directories` crate). The API key lives in the macOS Keychain (via `keyring`).
-
-The `AIServiceProfile` abstraction stays — v0.1 ships a single profile kind, `GeminiLive { model }`, but the shape leaves room for `OpenAIRealtime { ... }` and the deferred `WebBrowser { ... }` to be additive.
+The `AIServiceProfile` abstraction stays — v0.1 ships `GeminiLive { model }` and `Nope`, but the shape leaves room for `OpenAIRealtime { ... }` and the deferred `WebBrowser { ... }` to be additive.
 
 ## Conventions worth knowing
 
-- **Profiles are data, not subclasses.** When Phase 2/3 land, adding a service should be an enum variant plus the matching protocol adapter — not a new launcher hierarchy.
-- **Audio stays inside Rust.** `cpal` capture and playback live entirely in the core; raw PCM does not cross the FFI boundary. The shells get `StatusEvent`s, not audio frames.
+- **Profiles are data, not subclasses.** Adding a service should be an enum variant plus the matching protocol adapter — not a new launcher hierarchy. The `Vad` and `Responder` seams already follow this pattern.
+- **Audio stays inside Rust.** `cpal` capture and playback live entirely in the core; raw PCM does not cross the FFI boundary. The shells get `StatusEvent`s and file paths, not audio frames.
 - **Microphone permission is this app's concern** in v0.1 (different from the old browser design). `NSMicrophoneUsageDescription` is in the macOS Info.plist and the entitlement is set.
 - **Permissions are user-visible failure modes.** Bluetooth (`NSBluetoothAlwaysUsageDescription`), Microphone (`NSMicrophoneUsageDescription`), Login Item (`SMAppService.mainApp.register()`) all need to be surfaced clearly in the settings UI — silent failure is the design's biggest UX risk.
-- **Surface session failures explicitly.** When Gemini Live errors out, show a specific menu-bar message (`"No API key — open Settings"`, `"Gemini auth failed — check API key"`, `"Network error — will retry on next connect"`) rather than retrying silently.
-- **Costs are gated by VAD, not a daily cap.** The design's explicit decision: the relay only uploads when speech is detected, so a left-on speaker doesn't accrue cost. Revisit only if real-world usage shows it's still needed.
-- **Keep the FFI boundary small.** Every leaky type costs twice once Windows lands. Plan: `BTEvent` enum in, `StatusEvent` enum out, plus typed config accessors. No streaming, no callbacks for PCM, no opaque pointers if a value type fits.
+- **Surface session failures explicitly.** When Gemini Live errors out, show a specific menu-bar message (`"No API key — open Settings"`, `"Gemini auth failed — check API key"`, `"Network error — will retry on next connect"`) rather than retrying silently. The Rust error carries a human-readable `message()`; the Swift Coordinator falls back to a hard-coded mapping by error code.
+- **Costs are gated by VAD, not a daily cap.** The relay only uploads when speech is detected, so a left-on speaker doesn't accrue cost. Revisit only if real-world usage shows it's still needed.
+- **Keep the FFI boundary small.** Every leaky type costs twice once Windows lands. The shape is `BTEvent` enum in, `SessionCommand` in, `StatusEvent` snapshot out (JSON, revision-counted), plus typed config accessors. No streaming, no callbacks for PCM, no opaque pointers if a value type fits.
+- **CLAUDE.md is for agents, not users.** User-facing status lives in the README. Roadmap state lives in `docs/roadmap-v0.*.md`. Keep this file focused on what an incoming Claude session needs to know to work in the repo.
 
 ## Explicit non-goals
 
 Do not propose work in these areas without checking with the user — they were ruled out in the design:
 
-- Content filtering / moderation of what the child says.
+- Content filtering / moderation of what the child says (beyond the Gemini safety defaults already in `gemini.rs`).
 - Multi-user or multi-speaker routing.
 - Linux support.
 - iOS / iPad / Android support.
@@ -97,34 +108,58 @@ Do not propose work in these areas without checking with the user — they were 
 
 These are flagged in the design as risks; if a task touches them, treat the design's current answer as tentative:
 
-- Audio routing: macOS may not auto-switch system output to a freshly connected Bluetooth speaker. Force-default-output helper is planned but its default (on/off) is decided in M6 after real-hardware testing.
-- HFP audio quality (mono 8/16 kHz) for a child's voice through Gemini Live STT — accepted on paper, verify in M6.
-- WebRTC VAD vs. Silero VAD — start with WebRTC; fall back to Silero only if real-room testing shows misfires.
-- Gemini Live safety settings — the `BidiGenerateContent` setup rejects `safetySettings` (REST-only field). v0.1 relies on the model's built-in defaults plus the system-instruction persona. If real kid-voice testing surfaces problems, tighten the system instruction; there is no per-category threshold to tune on the Live endpoint.
-- Speaker auto-reconnect reliability is a Bluetooth-stack problem, not in scope to fix — document working speaker models instead.
-- FFI binding strategy (`uniffi` vs. hand-written C ABI vs. `swift-bridge`) — decide in M5 when the real surface lands.
+- Audio routing: macOS may not auto-switch system output to a freshly connected Bluetooth speaker. The force-default-output helper ships behind a settings toggle; its default (on/off) is still decided in M7 after real-hardware testing.
+- HFP audio quality (mono 8/16 kHz) for a child's voice through Gemini Live STT — accepted on paper, verify in M7.
+- Gemini Live safety settings — the `BidiGenerateContent` setup rejects `safetySettings` (REST-only field). v0.1 sends all four harm categories at `BLOCK_LOW_AND_ABOVE` plus a short friendly system instruction. If real kid-voice testing surfaces problems, tighten the system instruction; there is no per-category threshold to tune on the Live endpoint.
+- Speaker auto-reconnect reliability is a Bluetooth-stack problem, not in scope to fix — `docs/tested-speakers.md` (planned for OSS launch) is the answer.
+
+Resolved since the original design:
+
+- **WebRTC vs. Silero VAD** — both implementations ship; Silero is the default since v0.3 N3 after real-room testing showed WebRTC `VeryAggressive` leaks short noise clips on the target speaker.
+- **FFI binding strategy** — hand-written C ABI, decided in M6.
 
 ## Milestones (v0.1 = Phase 1, macOS only)
 
-- **M1** — Rust core skeleton + macOS Bluetooth watcher. *(in progress)*
-- **M2** — Audio capture + playback round-trip via `cpal`, exercised from the macOS shell.
-- **M3** — VAD relay using `libfvad`.
-- **M4** — Gemini Live WebSocket client + API key in Keychain (via `keyring`).
-- **M5** — Real FFI surface + Coordinator wiring + config persistence + `SMAppService` login item + error surfacing in the menu bar.
-- **M6** — On-hardware polish with real speaker and child voice.
+v0.1 milestones (see [docs/roadmap-v0.1.md](docs/roadmap-v0.1.md) for task-level state):
 
-When picking up work, identify which milestone the task belongs to before starting — earlier milestones intentionally don't have persistence or the full audio path.
+- **M1** — Rust core skeleton + macOS Bluetooth watcher. *(done)*
+- **M2** — Audio capture + playback round-trip via `cpal`. *(done)*
+- **M3** — VAD relay using `libfvad`. *(done)*
+- **M4** — Session recording + sessions browser. *(done — note: scope was reshuffled from the original design; the Gemini Live client landed in M5, and session history was promoted out of M6.)*
+- **M5** — Gemini Live WebSocket client + API key in Keychain. *(done)*
+- **M6** — Real FFI surface + Coordinator wiring + persistence + login item. *(done)*
+- **M7** — On-hardware polish (force-default-output default, VAD tuning, HFP quality verification, tested-speakers doc, sideload-ready signed/notarized build). *(in progress — most tasks still `todo`)*
+
+Post-v0.1 work that has already landed (see the matching roadmap files):
+
+- **v0.2** ([docs/roadmap-v0.2.md](docs/roadmap-v0.2.md)) — session delete, manual-session dialogue window, pluggable responder (Gemini / Nope).
+- **v0.3** ([docs/roadmap-v0.3.md](docs/roadmap-v0.3.md)) — pluggable VAD engine seam + Silero engine, Silero set as the default.
+- **v0.4** ([docs/roadmap-v0.4.md](docs/roadmap-v0.4.md)) — auto-session-on-BT-connect toggle, date-grouped Sessions window.
+
+When picking up work, identify which roadmap file the task belongs in before starting.
 
 ## Build
 
 Requires Xcode 15+, [XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`), and a Rust toolchain (`rustup`, stable ≥1.75).
 
 ```bash
-# Rust core
-cd core && cargo build
+# Rust core + regenerate the macOS Xcode project
+make build
 
-# macOS shell (links against the core, once FFI lands in M5)
+# Full app build via xcodebuild (also runs the cargo preBuildScript)
+make app
+
+# Run Rust tests
+make test
+```
+
+Or, manually:
+
+```bash
+cd core && cargo build
 cd shells/macos && xcodegen generate && open SpeakerAIConnector.xcodeproj
 ```
 
-`.xcodeproj` is generated, not checked in. The Rust core builds independently in M1; the link step into the macOS shell wires up alongside M5.
+`.xcodeproj` is generated, not checked in. The macOS shell links `libspeaker_core.a` via a cargo preBuildScript wired into `project.yml`. The Silero ONNX model is fetched by `shells/macos/Resources/fetch-silero.sh` (SHA-256 pinned) and bundled into `SpeakerAIConnector.app/Contents/Resources/`.
+
+For headless / CI builds of the core without the ONNX runtime, use `cargo build --no-default-features` (drops the `silero` feature; WebRTC engine still works).
