@@ -36,15 +36,21 @@ This app records audio. Every VAD-gated input utterance and every Gemini Live re
 
 Grab the latest `SpeakerAIConnector-vX.Y.Z.zip` from the [Releases page](https://github.com/secfree/speaker-ai-connector/releases), unzip it, and drag `SpeakerAIConnector.app` into `/Applications`.
 
-**Then run this once before opening it:**
+The release build is **not signed by Apple** — I don't pay the $99/yr Developer Program fee for a hobby project. Without that, macOS Gatekeeper quarantines downloaded apps and refuses to launch them with a misleading *"SpeakerAIConnector is damaged and can't be opened"* error. The app itself is fine — the release zips are built in the open by [`.github/workflows/release.yml`](.github/workflows/release.yml) from a tagged commit, and each release lists the SHA-256 of the zip so you can verify what you downloaded matches what CI produced. You have two ways to get past Gatekeeper:
+
+**Option A — clear the quarantine flag from the terminal:**
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/SpeakerAIConnector.app
 ```
 
-Why? The release build is **not signed by Apple** — I don't pay the $99/yr Developer Program fee for a hobby project. Without that, macOS Gatekeeper quarantines downloaded apps and refuses to launch them with a misleading *"SpeakerAIConnector is damaged and can't be opened"* error. The `xattr` command removes the quarantine flag macOS attached when your browser saved the zip; the app itself is fine. The release zips are built in the open by [`.github/workflows/release.yml`](.github/workflows/release.yml) from a tagged commit, and each release lists the SHA-256 of the zip so you can verify what you downloaded matches what CI produced.
+**Option B — approve via System Settings:**
 
-If you'd rather not run that command, build from source — same binary, no quarantine flag.
+1. Double-click the app. macOS will block it with the "damaged" / "unidentified developer" dialog — dismiss it.
+2. Open **System Settings → Privacy & Security**, scroll to the **Security** section.
+3. You'll see a note about SpeakerAIConnector being blocked with an **Open Anyway** button — click it and confirm.
+
+If you'd rather not do either, build from source — same binary, no quarantine flag.
 
 ## Build from source
 
