@@ -117,7 +117,13 @@ jobs:
         working-directory: shells/macos/build/Build/Products/Release
         run: |
           set -euo pipefail
-          NOTES=$(cat <<EOF
+
+          SHA256_LINE=$(cat "SpeakerAIConnector-${TAG}.zip.sha256")
+
+          # Write notes to a file so the heredoc body doesn't need to be
+          # quote-safe for bash's $(...) parser (an apostrophe in the body
+          # was previously breaking parsing).
+          cat > release-notes.md <<EOF
           Unsigned macOS build of Speaker AI Connector ${TAG}.
 
           **First-launch instructions** (required — the app is not notarized):
@@ -128,14 +134,13 @@ jobs:
           \`\`\`
 
           Then open the app from /Applications. See the README for the full
-          install + first-run walkthrough and why this app isn't signed.
+          install + first-run walkthrough and why this app is not signed.
 
           SHA-256 of the zip:
           \`\`\`
-          $(cat SpeakerAIConnector-${TAG}.zip.sha256)
+          ${SHA256_LINE}
           \`\`\`
           EOF
-          )
 
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" \
@@ -147,5 +152,5 @@ jobs:
               "SpeakerAIConnector-${TAG}.zip" \
               "SpeakerAIConnector-${TAG}.zip.sha256" \
               --title "${TAG}" \
-              --notes "${NOTES}"
+              --notes-file release-notes.md
           fi
