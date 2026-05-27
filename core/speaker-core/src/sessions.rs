@@ -461,13 +461,11 @@ impl SessionRecorder {
             active.transcript_buffer.push_str(chunk);
             return Ok(Some(active.seq));
         }
-        // No active clip — buffer for the next one *and* patch the most
-        // recent finalized clip on this direction so the UI shows the
-        // text immediately rather than only after the next clip opens.
-        match direction {
-            ClipDirection::In => sess.late_in_transcript.push_str(chunk),
-            ClipDirection::Out => sess.late_out_transcript.push_str(chunk),
-        }
+        // No active clip — patch the most-recently-finalized clip on
+        // this direction so the UI shows the text immediately rather
+        // than only after the next clip opens. This is the common path
+        // for Gemini input transcripts (they arrive after activityEnd
+        // closed the clip).
         let recent_seq = sess
             .clips
             .iter_mut()
@@ -481,6 +479,22 @@ impl SessionRecorder {
                 c.transcript = Some(merged);
                 c.seq
             });
+        // Only fall back to the late-arrival buffer when there is NO
+        // clip on this direction yet to patch. Doing both — as an
+        // earlier "defense in depth" version did — double-counted the
+        // chunk: the patch wrote it to clip N's transcript, and then
+        // begin_clip for clip N+2 (next clip on the same direction)
+        // drained the late buffer into its own transcript_buffer,
+        // so clip N+2 ended up prefixed with clip N's words. (See the
+        // session manifest reproduced in the bug report: `seq: 4`
+        // input transcript was `seq: 2`'s transcript with the actual
+        // turn-4 text appended.)
+        if recent_seq.is_none() {
+            match direction {
+                ClipDirection::In => sess.late_in_transcript.push_str(chunk),
+                ClipDirection::Out => sess.late_out_transcript.push_str(chunk),
+            }
+        }
         Ok(recent_seq)
     }
 
@@ -935,38 +949,88 @@ mod tests {
     }
 
     #[test]
-    fn late_transcript_carries_over_to_next_clip_on_same_direction() {
-        // Edge case: a transcript chunk lands after a clip closes but
-        // before the *next* clip on the same direction starts. The
-        // chunk first patches the most-recent clip; the carryover into
-        // the next clip is a defensive secondary — exercised here so the
-        // mechanism doesn't bitrot.
+    fn late_transcript_stays_with_its_own_clip_across_subsequent_clips() {
+        // Regression for the bug reported on session
+        // 2026-05-27T10-52-30Z: clip 2's (input) transcript was being
+        // *re-attached* to clip 4 (the next input clip) on top of clip
+        // 4's own transcript, producing the concatenation
+        //   "<clip-2 transcript>" + "<clip-4 transcript>"
+        // on disk. Root cause: the post-close fallback path patched the
+        // most-recent clip on this direction AND left the chunk in the
+        // late-arrival buffer, so the next begin_clip on the same
+        // direction inherited the previous turn's words as carry-over.
+        //
+        // Now: when there is a clip to patch, the late buffer stays
+        // empty — the patch alone is the single source of truth, and
+        // subsequent clips start clean.
         let root = tmp_root();
         let rec = SessionRecorder::new(root.clone());
         let id = rec
             .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
             .unwrap();
+
+        // Clip 1: input. Transcript arrives after end_clip.
         rec.begin_clip(ClipDirection::In, 16_000).unwrap();
         rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
         rec.end_clip(ClipDirection::In).unwrap();
         rec.append_transcript(ClipDirection::In, "first turn", true).unwrap();
 
+        // Clip 2: a different direction in between, mirroring the
+        // bug-report manifest where an out clip sat between the two
+        // in clips. Irrelevant to the bug but the test models it.
+        rec.begin_clip(ClipDirection::Out, 24_000).unwrap();
+        rec.write_frames(ClipDirection::Out, &vec![0i16; 24_000]).unwrap();
+        rec.end_clip(ClipDirection::Out).unwrap();
+        rec.append_transcript(ClipDirection::Out, "response", true).unwrap();
+
+        // Clip 3: next input clip. Its own transcript arrives after end_clip.
         rec.begin_clip(ClipDirection::In, 16_000).unwrap();
-        // The new clip starts seeded with the late chunk in its buffer
-        // — the recorder flushes that on close.
         rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
-        let end2 = rec.end_clip(ClipDirection::In).unwrap();
-        // The most-recent-patch wrote to clip 1's transcript; the
-        // carryover then also moved into clip 2's buffer (defense in
-        // depth). Both clips end up labelled — acceptable, since the
-        // alternative is silently dropping text.
-        assert_eq!(end2.transcript, "first turn");
+        let end3 = rec.end_clip(ClipDirection::In).unwrap();
+        // The new clip must NOT have inherited clip 1's transcript via
+        // the late buffer carry-over — that was the bug.
+        assert_eq!(end3.transcript, "");
+        rec.append_transcript(ClipDirection::In, "second turn", true).unwrap();
         rec.end_session().unwrap();
 
         let clips = rec.list_clips(&id).unwrap();
-        assert_eq!(clips.len(), 2);
-        assert_eq!(clips[0].transcript.as_deref(), Some("first turn"));
-        assert_eq!(clips[1].transcript.as_deref(), Some("first turn"));
+        assert_eq!(clips.len(), 3);
+        let by_seq: std::collections::HashMap<u32, &ClipMeta> =
+            clips.iter().map(|c| (c.seq, c)).collect();
+        assert_eq!(by_seq[&1].transcript.as_deref(), Some("first turn"));
+        assert_eq!(by_seq[&2].transcript.as_deref(), Some("response"));
+        // The point of the regression: clip 3 holds *only* its own
+        // transcript, not "first turn" + "second turn".
+        assert_eq!(by_seq[&3].transcript.as_deref(), Some("second turn"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn pre_first_clip_transcript_falls_through_to_first_clip_on_direction() {
+        // Defensive corner: if a transcript chunk ever arrived before
+        // any clip on this direction has opened, the late-arrival
+        // buffer is the only place to park it. This case is not
+        // expected against real Gemini Live (server STT only fires for
+        // audio we uploaded, which requires a clip), but the safety net
+        // is here — exercise it so it doesn't bitrot.
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let id = rec
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
+            .unwrap();
+        // Chunk arrives before the first input clip opens.
+        let seq = rec.append_transcript(ClipDirection::In, "stray", false).unwrap();
+        assert_eq!(seq, None, "no clip to attach to yet");
+
+        rec.begin_clip(ClipDirection::In, 16_000).unwrap();
+        rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
+        let end = rec.end_clip(ClipDirection::In).unwrap();
+        // The first clip drained the late buffer on begin_clip.
+        assert_eq!(end.transcript, "stray");
+        rec.end_session().unwrap();
+
+        let clips = rec.list_clips(&id).unwrap();
+        assert_eq!(clips[0].transcript.as_deref(), Some("stray"));
         cleanup(&root);
     }
 
