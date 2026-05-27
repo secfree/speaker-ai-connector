@@ -196,7 +196,11 @@ unsafe fn has_output_streams(device: AudioObjectID) -> bool {
     {
         return false;
     }
-    let mut buf = vec![0u8; size as usize];
+    // Back the buffer with u64 so it satisfies AudioBufferList's 8-byte
+    // alignment (AudioBuffer contains a pointer field). A plain Vec<u8> is
+    // only 1-byte aligned and triggers a misaligned-dereference panic.
+    let words = (size as usize + 7) / 8;
+    let mut buf = vec![0u64; words.max(1)];
     let mut io_size = size;
     if AudioObjectGetPropertyData(
         device,
@@ -215,8 +219,8 @@ unsafe fn has_output_streams(device: AudioObjectID) -> bool {
         return false;
     }
     // The struct flexibly trails `n` AudioBuffers after the count; walk
-    // them via the base pointer rather than the [1]-sized field.
-    let buffers_ptr = (buf.as_ptr() as *const u8).add(std::mem::size_of::<u32>()) as *const AudioBuffer;
+    // from the buffers field so the offset includes #[repr(C)] padding.
+    let buffers_ptr = list.buffers.as_ptr();
     (0..n).any(|i| (*buffers_ptr.add(i)).number_channels > 0)
 }
 

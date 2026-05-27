@@ -774,11 +774,11 @@ const ECHO_GUARD_TAIL_NS: u64 = 600_000_000;
 /// first playback burst with zeros means whatever the speaker drops on
 /// warm-up is silence rather than real speech.
 ///
-/// Tuned conservatively at 1000 ms — long enough to cover the worst HFP
+/// Tuned conservatively at 1500 ms — long enough to cover the worst HFP
 /// warm-ups observed in the field. The cost is the greeting starts ~1 s
 /// later for every session; only revisit if M7's tested-speakers work
 /// shows a tighter number is enough.
-const FIRST_PLAYBACK_PAD_MS: u64 = 1000;
+const FIRST_PLAYBACK_PAD_MS: u64 = 1500;
 
 /// Convenience wrapper for the manual path (kept so the FFI surface
 /// stays stable). Manual sessions have no target address and use the
