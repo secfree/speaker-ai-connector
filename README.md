@@ -4,6 +4,10 @@ Screen-free AI for kids: when a configured Bluetooth speaker connects to your Ma
 
 > Status: v0.1 macOS only. The Rust core is portable; the Windows shell is the next version.
 
+| Menu bar | Live session |
+| --- | --- |
+| ![Menu bar](docs/images/menu-bar.png) | ![Live session](docs/images/live-session.png) |
+
 ## What works today
 
 - **Bluetooth-triggered sessions.** Picks up `IOBluetooth` connect/disconnect for a chosen paired speaker, debounces, and starts/ends a session automatically.
