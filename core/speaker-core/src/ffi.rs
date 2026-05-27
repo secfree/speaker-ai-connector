@@ -475,6 +475,9 @@ pub extern "C" fn speaker_core_manual_session_start(
                 model: model_str,
                 main_language: settings.main_language,
                 alternative_language: settings.alternative_language,
+                initial_greeting: Some(
+                    crate::gemini::DEFAULT_GREETING_PROMPT.to_string(),
+                ),
             }
         }
         ResponderKind::Nope => ResponderInit::Nope,

@@ -79,6 +79,13 @@ pub const INPUT_SAMPLE_RATE: u32 = 16_000;
 /// the output device rate.
 pub const OUTPUT_SAMPLE_RATE: u32 = 24_000;
 
+/// Prompt sent as a one-shot user turn right after `setupComplete` so the
+/// model speaks first when a session opens. The output language is pinned
+/// by the system instruction, so this stays English — it's read by the
+/// model, not by the child.
+pub const DEFAULT_GREETING_PROMPT: &str =
+    "Greet the child with one short, warm sentence and invite them to talk.";
+
 /// Builds the system instruction. Persona is fixed; the language clause
 /// is templated because the Live API drifts to other languages without an
 /// explicit pin (see issue #1). `main` is required, `alternative` is
@@ -151,6 +158,10 @@ enum UploadItem {
     Audio(Vec<i16>),
     ActivityStart,
     ActivityEnd,
+    /// One-shot text turn from the client side — used by the initial
+    /// greeting so the model speaks first when the session opens.
+    /// Serialized as a `clientContent` envelope with `turnComplete: true`.
+    ClientText(String),
 }
 
 pub struct GeminiSession {
@@ -165,6 +176,7 @@ impl GeminiSession {
         model: String,
         main_language: String,
         alternative_language: Option<String>,
+        initial_greeting: Option<String>,
         sink: Arc<dyn EventSink>,
     ) -> Result<Self, GeminiError> {
         if api_key.is_empty() {
@@ -175,6 +187,7 @@ impl GeminiSession {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_thread = shutdown.clone();
         let sink_thread = sink.clone();
+        let greet_tx = upload_tx.clone();
 
         // Bounded one-shot for the initial connect result so the caller
         // can fail loudly (NoApiKey, AuthFailed, Network) instead of
@@ -201,6 +214,8 @@ impl GeminiSession {
                     model,
                     main_language,
                     alternative_language,
+                    initial_greeting,
+                    greet_tx,
                     upload_rx,
                     sink_thread,
                     shutdown_thread,
@@ -383,6 +398,25 @@ struct AudioBlob {
     data: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientContentEnvelope<'a> {
+    client_content: ClientContent<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientContent<'a> {
+    turns: Vec<TurnContent<'a>>,
+    turn_complete: bool,
+}
+
+#[derive(Serialize)]
+struct TurnContent<'a> {
+    role: &'a str,
+    parts: Vec<TextPart<'a>>,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ServerMessage {
@@ -442,6 +476,8 @@ async fn run_session(
     model: String,
     main_language: String,
     alternative_language: Option<String>,
+    initial_greeting: Option<String>,
+    greet_tx: mpsc::UnboundedSender<UploadItem>,
     mut upload_rx: mpsc::UnboundedReceiver<UploadItem>,
     sink: Arc<dyn EventSink>,
     shutdown: Arc<AtomicBool>,
@@ -535,6 +571,12 @@ async fn run_session(
 
     let sink_read = sink.clone();
     let shutdown_read = shutdown.clone();
+    // Greeting state lives in the read task so it can fire exactly once,
+    // after setupComplete arrives — sending clientContent before the
+    // server has finished processing setup is rejected on some Live
+    // deployments. `Option::take` makes this a clean one-shot.
+    let mut pending_greeting = initial_greeting;
+    let greet_tx_read = greet_tx;
     let read_task = tokio::spawn(async move {
         loop {
             // Poll-with-timeout so shutdown can break a server that
@@ -555,13 +597,25 @@ async fn run_session(
             match msg {
                 Ok(Message::Text(t)) => {
                     eprintln!("speaker-core: gemini recv text ({} bytes)", t.len());
-                    dispatch_server_text(&sink_read, &t);
+                    let setup_done = dispatch_server_text(&sink_read, &t);
+                    if setup_done {
+                        if let Some(text) = pending_greeting.take() {
+                            eprintln!("speaker-core: gemini enqueueing initial greeting");
+                            let _ = greet_tx_read.send(UploadItem::ClientText(text));
+                        }
+                    }
                 }
                 Ok(Message::Binary(b)) => {
                     eprintln!("speaker-core: gemini recv binary ({} bytes)", b.len());
                     // Some Live deployments deliver JSON as binary frames.
                     if let Ok(t) = std::str::from_utf8(&b) {
-                        dispatch_server_text(&sink_read, t);
+                        let setup_done = dispatch_server_text(&sink_read, t);
+                        if setup_done {
+                            if let Some(text) = pending_greeting.take() {
+                                eprintln!("speaker-core: gemini enqueueing initial greeting");
+                                let _ = greet_tx_read.send(UploadItem::ClientText(text));
+                            }
+                        }
                     } else {
                         eprintln!("speaker-core: gemini binary frame is not valid UTF-8");
                     }
@@ -657,6 +711,41 @@ async fn run_session(
             true
         }
 
+        async fn send_client_text<W>(
+            writer: &mut W,
+            text: &str,
+            sink: &Arc<dyn EventSink>,
+        ) -> bool
+        where
+            W: SinkExt<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+        {
+            let env = ClientContentEnvelope {
+                client_content: ClientContent {
+                    turns: vec![TurnContent {
+                        role: "user",
+                        parts: vec![TextPart { text }],
+                    }],
+                    turn_complete: true,
+                },
+            };
+            let json = match serde_json::to_string(&env) {
+                Ok(s) => s,
+                Err(e) => {
+                    sink.handle(GeminiEvent::Error(GeminiError::Other(format!(
+                        "client text serialize: {e}"
+                    ))));
+                    return false;
+                }
+            };
+            if let Err(e) = writer.send(Message::Text(json.into())).await {
+                sink.handle(GeminiEvent::Error(GeminiError::Network(format!(
+                    "client text send: {e}"
+                ))));
+                return false;
+            }
+            true
+        }
+
         'outer: loop {
             if write_shutdown.load(Ordering::SeqCst) {
                 break;
@@ -701,6 +790,16 @@ async fn run_session(
                     }
                     continue;
                 }
+                UploadItem::ClientText(text) => {
+                    if !flush_audio(&mut writer, &mut pending, &write_sink).await {
+                        break 'outer;
+                    }
+                    eprintln!("speaker-core: gemini sending clientContent ({} chars)", text.len());
+                    if !send_client_text(&mut writer, &text, &write_sink).await {
+                        break 'outer;
+                    }
+                    continue;
+                }
             }
             // Opportunistically drain queued audio so a busy capture path
             // doesn't backlog. Bounded so we never base64 an unbounded
@@ -741,6 +840,16 @@ async fn run_session(
                         }
                         continue 'outer;
                     }
+                    Ok(UploadItem::ClientText(text)) => {
+                        if !flush_audio(&mut writer, &mut pending, &write_sink).await {
+                            break 'outer;
+                        }
+                        eprintln!("speaker-core: gemini sending clientContent ({} chars)", text.len());
+                        if !send_client_text(&mut writer, &text, &write_sink).await {
+                            break 'outer;
+                        }
+                        continue 'outer;
+                    }
                     Err(_) => break,
                 }
             }
@@ -773,7 +882,9 @@ fn classify_connect_error(e: tokio_tungstenite::tungstenite::Error) -> GeminiErr
     }
 }
 
-fn dispatch_server_text(sink: &Arc<dyn EventSink>, text: &str) {
+/// Returns `true` if this frame was a `setupComplete`. The read task uses
+/// the signal to fire the one-shot initial greeting at the right moment.
+fn dispatch_server_text(sink: &Arc<dyn EventSink>, text: &str) -> bool {
     let msg: ServerMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(_) => {
@@ -783,13 +894,14 @@ fn dispatch_server_text(sink: &Arc<dyn EventSink>, text: &str) {
             // so a giant inline-data payload can't flood stderr.
             let truncated = if text.len() > 2048 { &text[..2048] } else { text };
             eprintln!("speaker-core: gemini unparsed frame: {truncated}");
-            return;
+            return false;
         }
     };
-    if msg.setup_complete.is_some() {
+    let setup_done = msg.setup_complete.is_some();
+    if setup_done {
         sink.handle(GeminiEvent::SetupComplete);
     }
-    let Some(content) = msg.server_content else { return };
+    let Some(content) = msg.server_content else { return setup_done };
     if let Some(turn) = content.model_turn {
         for part in turn.parts {
             if let Some(data) = part.inline_data {
@@ -817,6 +929,7 @@ fn dispatch_server_text(sink: &Arc<dyn EventSink>, text: &str) {
     if content.turn_complete == Some(true) {
         sink.handle(GeminiEvent::TurnComplete);
     }
+    setup_done
 }
 
 #[cfg(test)]
@@ -881,6 +994,7 @@ mod tests {
             DEFAULT_MODEL.into(),
             "English".into(),
             None,
+            None,
             sink,
         ) {
             Err(GeminiError::NoApiKey) => {}
@@ -919,5 +1033,25 @@ mod tests {
     fn system_instruction_treats_empty_alt_as_none() {
         let s = build_system_instruction("English", Some(""));
         assert!(s.contains("Always reply in English."));
+    }
+
+    #[test]
+    fn client_content_envelope_serializes_as_user_turn_complete() {
+        let env = ClientContentEnvelope {
+            client_content: ClientContent {
+                turns: vec![TurnContent {
+                    role: "user",
+                    parts: vec![TextPart { text: "hi" }],
+                }],
+                turn_complete: true,
+            },
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        // Wire field names are dictated by the Live API; pin them so a
+        // future rename of the Rust fields can't drift silently.
+        assert!(json.contains("\"clientContent\""));
+        assert!(json.contains("\"turnComplete\":true"));
+        assert!(json.contains("\"role\":\"user\""));
+        assert!(json.contains("\"text\":\"hi\""));
     }
 }

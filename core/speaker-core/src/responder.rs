@@ -67,6 +67,10 @@ pub enum ResponderInit {
         model: String,
         main_language: String,
         alternative_language: Option<String>,
+        /// Optional one-shot prompt sent as a `clientContent` user turn
+        /// once the Live setup handshake completes — used to make the
+        /// model speak first instead of waiting for the child to talk.
+        initial_greeting: Option<String>,
     },
     Nope,
 }
@@ -99,8 +103,16 @@ impl ResponderSession {
                 model,
                 main_language,
                 alternative_language,
-            } => GeminiSession::start(api_key, model, main_language, alternative_language, sink)
-                .map(ResponderSession::Gemini),
+                initial_greeting,
+            } => GeminiSession::start(
+                api_key,
+                model,
+                main_language,
+                alternative_language,
+                initial_greeting,
+                sink,
+            )
+            .map(ResponderSession::Gemini),
             ResponderInit::Nope => Ok(ResponderSession::Nope),
         }
     }
@@ -208,6 +220,7 @@ mod tests {
             model: "models/test".into(),
             main_language: "English".into(),
             alternative_language: None,
+            initial_greeting: None,
         };
         assert_eq!(g.kind(), ResponderKind::Gemini);
         assert_eq!(ResponderInit::Nope.kind(), ResponderKind::Nope);

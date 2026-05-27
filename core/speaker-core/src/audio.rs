@@ -767,6 +767,19 @@ const PLAYBACK_QUEUE_INITIAL_CAPACITY: usize = 24_000 * 5;
 /// already accepts since HFP has no AEC.
 const ECHO_GUARD_TAIL_NS: u64 = 600_000_000;
 
+/// One-shot leading silence pushed into the playback queue ahead of the
+/// session's first model audio chunk. HFP routing on macOS can swallow
+/// the first ~hundreds of ms of audio after the Bluetooth link finishes
+/// negotiating, which clips the greeting; padding the front of the very
+/// first playback burst with zeros means whatever the speaker drops on
+/// warm-up is silence rather than real speech.
+///
+/// Tuned conservatively at 1000 ms — long enough to cover the worst HFP
+/// warm-ups observed in the field. The cost is the greeting starts ~1 s
+/// later for every session; only revisit if M7's tested-speakers work
+/// shows a tighter number is enough.
+const FIRST_PLAYBACK_PAD_MS: u64 = 1000;
+
 /// Convenience wrapper for the manual path (kept so the FFI surface
 /// stays stable). Manual sessions have no target address and use the
 /// `Manual` trigger so the manifest reads `"trigger": "manual"`.
@@ -845,6 +858,12 @@ pub fn start_session(
     let queue_for_sink = playback_queue.clone();
     let out_clip_for_sink = out_clip_open.clone();
     let play_out_for_sink = play_out_until_ns.clone();
+    // One-shot: armed at session start, disarmed when the first model
+    // audio chunk lands. Drives the FIRST_PLAYBACK_PAD_MS warm-up pad so
+    // a slow-starting HFP link can't eat the greeting's opening. Only
+    // the sink closure ever touches it, so the Arc parent isn't kept
+    // beyond the clone moved into the closure.
+    let first_chunk_for_sink = Arc::new(AtomicBool::new(true));
     // Flipped on Error/Closed. The input callback checks this to stop
     // hammering the dead upload channel, and we use it to gate the
     // one-shot teardown thread so we only spawn it once per session.
@@ -885,7 +904,22 @@ pub fn start_session(
                     (samples.len() as u64) * 1_000_000_000 / OUTPUT_SAMPLE_RATE as u64;
                 let now_ns = session_start.elapsed().as_nanos() as u64;
                 let prev = play_out_for_sink.load(Ordering::SeqCst);
-                let new_until = std::cmp::max(prev, now_ns).saturating_add(chunk_ns);
+                // First-chunk warm-up pad: prepend silence so HFP startup
+                // truncation eats zeros rather than the greeting. The pad
+                // is NOT written to the recorder — the saved Out clip
+                // stays a clean copy of the model's audio. The play-out
+                // clock advances by `pad_ns + chunk_ns` so the echo guard
+                // tail accounts for the extra silence too.
+                let pad_ns = if first_chunk_for_sink
+                    .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+                {
+                    FIRST_PLAYBACK_PAD_MS * 1_000_000
+                } else {
+                    0
+                };
+                let new_until =
+                    std::cmp::max(prev, now_ns).saturating_add(pad_ns + chunk_ns);
                 play_out_for_sink.store(new_until, Ordering::SeqCst);
 
                 // Queue is unbounded on purpose: dropping from the front
@@ -893,6 +927,11 @@ pub fn start_session(
                 // faster than real-time, while the saved WAV stayed fine.
                 // See issue #4.
                 let mut q = queue_for_sink.lock().unwrap();
+                if pad_ns > 0 {
+                    let pad_samples =
+                        (FIRST_PLAYBACK_PAD_MS * OUTPUT_SAMPLE_RATE as u64 / 1_000) as usize;
+                    q.extend(std::iter::repeat(0i16).take(pad_samples));
+                }
                 q.extend(samples);
             }
             GeminiEvent::TurnComplete | GeminiEvent::Interrupted => {

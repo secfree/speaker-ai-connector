@@ -632,6 +632,9 @@ impl Coordinator {
                     model: settings.model.clone(),
                     main_language: settings.main_language.clone(),
                     alternative_language: settings.alternative_language.clone(),
+                    initial_greeting: Some(
+                        crate::gemini::DEFAULT_GREETING_PROMPT.to_string(),
+                    ),
                 }
             }
             ResponderKind::Nope => ResponderInit::Nope,
