@@ -36,6 +36,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # XcodeGen emits projects in objectVersion 77 (Xcode 16 format), which
+      # the macos-14 runner's default Xcode 15.4 can't open. Pin to an Xcode
+      # 16.x that the runner image ships.
+      - name: Select Xcode 16
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: "16.0"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
