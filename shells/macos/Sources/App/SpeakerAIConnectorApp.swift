@@ -63,15 +63,17 @@ struct SpeakerAIConnectorApp: App {
     }
 
     private func menuIcon(for status: StatusEvent) -> String {
+        // App identity is a hare — child-audience cue and a distinctive
+        // menu-bar mark. Outline = idle, filled = a session is in flight,
+        // and live BT streaming keeps the `dot.radiowaves` glyph because
+        // that's the one state where "we are live right now" needs to
+        // read at a glance. Errors keep an explicit warning glyph.
         switch status {
         case .sessionActive: return "dot.radiowaves.left.and.right"
-        case .sessionLaunching: return "arrow.triangle.2.circlepath"
-        case .manualSessionActive: return "mic.fill"
-        case .manualSessionLaunching: return "mic.badge.plus"
-        case .tearingDown: return "arrow.down.circle"
+        case .manualSessionActive: return "hare.fill"
+        case .sessionLaunching, .manualSessionLaunching, .tearingDown: return "hare.fill"
         case .error: return "exclamationmark.triangle"
-        case .noDeviceSelected: return "questionmark.circle"
-        case .waitingForDevice, .idle: return "speaker.wave.2"
+        case .noDeviceSelected, .waitingForDevice, .idle: return "hare"
         }
     }
 }
