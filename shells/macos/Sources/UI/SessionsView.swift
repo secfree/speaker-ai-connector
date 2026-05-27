@@ -249,53 +249,99 @@ struct SessionsView: View {
         var rows: [LiveRowModel] = []
         var openInput: Int? = nil
         var openOutput: Int? = nil
+        // Index of the most-recent row of each direction, regardless of
+        // whether the underlying clip is still open. Transcript chunks
+        // arrive after `activityEnd` closes the input clip, so the late
+        // path attaches by the last seen row, not the open one.
+        var lastInput: Int? = nil
+        var lastOutput: Int? = nil
         for event in coordinator.dialogueEvents {
             switch event.kind {
-            case .inputClipStarted(_, let offset):
+            case .inputClipStarted(let clipSeq, let offset):
                 rows.append(LiveRowModel(
                     id: event.seq,
+                    clipSeq: clipSeq,
                     direction: .input,
                     offsetMs: offset,
                     durationMs: nil,
-                    path: nil
+                    path: nil,
+                    transcript: "",
+                    transcriptFinal: false
                 ))
                 openInput = rows.count - 1
-            case .inputClipEnded(_, let duration, let path):
+                lastInput = rows.count - 1
+            case .inputClipEnded(_, let duration, let path, let transcript):
                 if let idx = openInput {
                     rows[idx].durationMs = duration
                     rows[idx].path = path
+                    if !transcript.isEmpty {
+                        rows[idx].transcript = transcript
+                    }
                     openInput = nil
+                    lastInput = idx
                 } else {
                     rows.append(LiveRowModel(
                         id: event.seq,
+                        clipSeq: 0,
                         direction: .input,
                         offsetMs: 0,
                         durationMs: duration,
-                        path: path
+                        path: path,
+                        transcript: transcript,
+                        transcriptFinal: false
                     ))
+                    lastInput = rows.count - 1
                 }
-            case .outputClipStarted(_, let offset):
+            case .outputClipStarted(let clipSeq, let offset):
                 rows.append(LiveRowModel(
                     id: event.seq,
+                    clipSeq: clipSeq,
                     direction: .output,
                     offsetMs: offset,
                     durationMs: nil,
-                    path: nil
+                    path: nil,
+                    transcript: "",
+                    transcriptFinal: false
                 ))
                 openOutput = rows.count - 1
-            case .outputClipEnded(_, let duration, let path):
+                lastOutput = rows.count - 1
+            case .outputClipEnded(_, let duration, let path, let transcript):
                 if let idx = openOutput {
                     rows[idx].durationMs = duration
                     rows[idx].path = path
+                    if !transcript.isEmpty {
+                        rows[idx].transcript = transcript
+                    }
                     openOutput = nil
+                    lastOutput = idx
                 } else {
                     rows.append(LiveRowModel(
                         id: event.seq,
+                        clipSeq: 0,
                         direction: .output,
                         offsetMs: 0,
                         durationMs: duration,
-                        path: path
+                        path: path,
+                        transcript: transcript,
+                        transcriptFinal: false
                     ))
+                    lastOutput = rows.count - 1
+                }
+            case .inputClipTranscript(let clipSeq, let text, let isFinal):
+                // Prefer the row whose clipSeq matches; fall back to the
+                // most-recent input row. A mismatch happens during the
+                // brief window where the manifest hasn't flushed yet
+                // and a synthesized row carries clipSeq=0.
+                if let idx = rows.lastIndex(where: { $0.direction == .input && $0.clipSeq == clipSeq })
+                    ?? lastInput {
+                    rows[idx].transcript += text
+                    if isFinal { rows[idx].transcriptFinal = true }
+                }
+            case .outputClipTranscript(let clipSeq, let text, let isFinal):
+                if let idx = rows.lastIndex(where: { $0.direction == .output && $0.clipSeq == clipSeq })
+                    ?? lastOutput {
+                    rows[idx].transcript += text
+                    if isFinal { rows[idx].transcriptFinal = true }
                 }
             case .sessionStarted, .sessionEnded, .unknown:
                 continue
@@ -445,10 +491,22 @@ private struct LiveContext {
 
 private struct LiveRowModel: Identifiable, Equatable {
     let id: UInt64
+    /// Clip ordinal within the session (1-based). Matched against
+    /// transcript events so a row can absorb its own chunks rather than
+    /// stealing them from a neighbouring row of the same direction.
+    let clipSeq: UInt32
     let direction: Direction
     let offsetMs: UInt64
     var durationMs: UInt64?
     var path: String?
+    /// Concatenated transcript chunks for this clip — `""` while waiting
+    /// for the first chunk, then incrementally appended as Live emits
+    /// partials. The manifest holds the same final text on disk.
+    var transcript: String
+    /// Live's `finished: true` flag on the last transcript chunk. Drives
+    /// the italic-vs-plain styling in `LiveClipRow` so the user can tell
+    /// "still being spoken" from "done".
+    var transcriptFinal: Bool
 
     enum Direction { case input, output }
 }
@@ -618,6 +676,9 @@ private struct LiveClipRow: View {
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                if !row.transcript.isEmpty {
+                    TranscriptText(text: row.transcript, partial: !row.transcriptFinal)
+                }
             }
             Spacer()
             if row.path != nil {
@@ -650,6 +711,9 @@ private struct ClipRow: View {
                 Text("+\(formatDuration(clip.offsetSecs)) from start · \(clip.file)")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let transcript = clip.transcript, !transcript.isEmpty {
+                    TranscriptText(text: transcript, partial: false)
+                }
             }
             Spacer()
             Button(action: playing ? onStop : onPlay) {
@@ -658,6 +722,32 @@ private struct ClipRow: View {
             .buttonStyle(.borderless)
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Quoted-block rendering for a clip transcript. Truncates to three
+/// lines so a chatty model burst doesn't blow up the row; the full text
+/// shows on hover as a tooltip. `partial` italicises the text while the
+/// transcript is still streaming, matching the existing "in progress…"
+/// styling on the duration line.
+private struct TranscriptText: View {
+    let text: String
+    let partial: Bool
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            Image(systemName: "text.quote")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(text)
+                .font(.caption)
+                .italic(partial)
+                .foregroundStyle(.primary.opacity(0.85))
+                .lineLimit(3)
+                .truncationMode(.tail)
+                .textSelection(.enabled)
+        }
+        .help(text)
     }
 }
 

@@ -116,9 +116,10 @@ fn build_system_instruction(main: &str, alternative: Option<&str>) -> String {
     )
 }
 
-/// Events emitted to the audio layer / session recorder. Lifecycle is
-/// intentionally narrow — anything richer (transcripts, tool calls)
-/// becomes a problem when it does, not before.
+/// Events emitted to the audio layer / session recorder. Transcript
+/// variants land via Live's `inputAudioTranscription` /
+/// `outputAudioTranscription` opt-ins on the setup envelope — see
+/// issue #3 (per-clip text in the Sessions window).
 #[derive(Debug)]
 pub enum GeminiEvent {
     /// Server accepted the setup; safe to start streaming.
@@ -132,6 +133,14 @@ pub enum GeminiEvent {
     /// the playback queue can flush instead of letting the partial
     /// reply drain.
     Interrupted,
+    /// Partial or final transcript chunk for the user's most recent
+    /// input turn. Live streams these alongside the audio it's already
+    /// processing — no separate STT engine. `is_final` mirrors the
+    /// server's `finished` flag and lets the recorder commit the
+    /// accumulated buffer to the manifest.
+    InputTranscript { text: String, is_final: bool },
+    /// Partial or final transcript chunk for the model's spoken reply.
+    OutputTranscript { text: String, is_final: bool },
     /// Connection ended cleanly (server close or local shutdown).
     Closed,
     Error(GeminiError),
@@ -340,7 +349,21 @@ struct Setup<'a> {
     generation_config: GenerationConfig,
     system_instruction: SystemInstruction<'a>,
     realtime_input_config: RealtimeInputConfig,
+    /// Opt in to server-side transcription of the user's audio uploads.
+    /// Empty object — Live treats `{}` as "enabled, default config".
+    /// Without this the server stays silent on the input side; we get
+    /// no STT and the Sessions window has nothing to show for input
+    /// clips. (See issue #3.)
+    input_audio_transcription: TranscriptionConfig,
+    /// Same opt-in for the model's spoken response. Live's TTS pipeline
+    /// already knows the script — this just unblocks it for us.
+    output_audio_transcription: TranscriptionConfig,
 }
+
+/// Empty placeholder — Live currently accepts no tuning knobs here, but
+/// the field has to exist for the opt-in to register.
+#[derive(Serialize, Default)]
+struct TranscriptionConfig {}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -435,6 +458,27 @@ struct ServerContent {
     turn_complete: Option<bool>,
     #[serde(default)]
     interrupted: Option<bool>,
+    /// Server-side STT of the user's just-uploaded turn. Live streams
+    /// this in chunks, marking the final chunk with `finished: true`
+    /// — typically arrives *after* `activityEnd` closes the input clip
+    /// on our side, so the recorder has to attach by direction order.
+    #[serde(default)]
+    input_transcription: Option<Transcription>,
+    /// Same for the model's spoken response. Arrives interleaved with
+    /// `AudioChunk` frames; the final chunk lands at or near
+    /// `turn_complete`.
+    #[serde(default)]
+    output_transcription: Option<Transcription>,
+}
+
+#[derive(Deserialize)]
+struct Transcription {
+    #[serde(default)]
+    text: String,
+    /// Live's "this is the last chunk for this turn" flag. Absent on
+    /// partial chunks; defaults to `false` on the wire.
+    #[serde(default)]
+    finished: bool,
 }
 
 #[derive(Deserialize)]
@@ -542,6 +586,8 @@ async fn run_session(
             realtime_input_config: RealtimeInputConfig {
                 automatic_activity_detection: AutomaticActivityDetection { disabled: true },
             },
+            input_audio_transcription: TranscriptionConfig::default(),
+            output_audio_transcription: TranscriptionConfig::default(),
         },
     };
     let setup_json = match serde_json::to_string(&setup) {
@@ -923,6 +969,22 @@ fn dispatch_server_text(sink: &Arc<dyn EventSink>, text: &str) -> bool {
             }
         }
     }
+    // Transcripts arrive interleaved with audio. Empty `text` is normal
+    // on the last "finished" chunk (Live signals "no more text, this turn
+    // is done"); pass it through so the recorder can flip the partial
+    // into a final write without having to model the boundary itself.
+    if let Some(tr) = content.input_transcription {
+        sink.handle(GeminiEvent::InputTranscript {
+            text: tr.text,
+            is_final: tr.finished,
+        });
+    }
+    if let Some(tr) = content.output_transcription {
+        sink.handle(GeminiEvent::OutputTranscript {
+            text: tr.text,
+            is_final: tr.finished,
+        });
+    }
     if content.interrupted == Some(true) {
         sink.handle(GeminiEvent::Interrupted);
     }
@@ -949,6 +1011,30 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), codes.len());
+    }
+
+    #[test]
+    fn server_message_parses_transcripts() {
+        // Live sends input + output transcription chunks inside
+        // server_content; ensure we surface both with the right is_final.
+        let json = r#"{"serverContent":{"inputTranscription":{"text":"hello"},"outputTranscription":{"text":"hi there","finished":true}}}"#;
+        let captured: Arc<std::sync::Mutex<Vec<(String, String, bool)>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let sink: Arc<dyn EventSink> = Arc::new(move |e: GeminiEvent| match e {
+            GeminiEvent::InputTranscript { text, is_final } => {
+                cap.lock().unwrap().push(("in".into(), text, is_final));
+            }
+            GeminiEvent::OutputTranscript { text, is_final } => {
+                cap.lock().unwrap().push(("out".into(), text, is_final));
+            }
+            _ => {}
+        });
+        dispatch_server_text(&sink, json);
+        let got = captured.lock().unwrap().clone();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], ("in".to_string(), "hello".to_string(), false));
+        assert_eq!(got[1], ("out".to_string(), "hi there".to_string(), true));
     }
 
     #[test]

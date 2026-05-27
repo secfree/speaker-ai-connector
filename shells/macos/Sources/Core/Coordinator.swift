@@ -222,9 +222,17 @@ struct DialogueEvent: Identifiable, Equatable {
         case sessionStarted(trigger: String, id: String, startUnixSecs: UInt64)
         case sessionEnded
         case inputClipStarted(clipSeq: UInt32, offsetMs: UInt64)
-        case inputClipEnded(clipSeq: UInt32, durationMs: UInt64, path: String)
+        /// `transcript` is empty when the clip closed before Live emitted
+        /// any text — the late chunks arrive as `inputClipTranscript`.
+        case inputClipEnded(clipSeq: UInt32, durationMs: UInt64, path: String, transcript: String)
         case outputClipStarted(clipSeq: UInt32, offsetMs: UInt64)
-        case outputClipEnded(clipSeq: UInt32, durationMs: UInt64, path: String)
+        case outputClipEnded(clipSeq: UInt32, durationMs: UInt64, path: String, transcript: String)
+        /// One transcript chunk for an already-known clip. Live streams
+        /// these in pieces; the live view concatenates by `clipSeq`. The
+        /// recorder's manifest stores the full text — this event only
+        /// exists so the UI can render text as it streams.
+        case inputClipTranscript(clipSeq: UInt32, text: String, isFinal: Bool)
+        case outputClipTranscript(clipSeq: UInt32, text: String, isFinal: Bool)
         case unknown(String)
     }
 
@@ -248,13 +256,17 @@ private struct ClipEventPayload: Decodable {
     let trigger: String?
     let id: String?
     let startUnixSecs: UInt64?
+    let text: String?
+    let isFinal: Bool?
+    let transcript: String?
 
     enum CodingKeys: String, CodingKey {
         case eventSeq = "event_seq"
-        case kind, seq, path, trigger, id
+        case kind, seq, path, trigger, id, text, transcript
         case offsetMs = "offset_ms"
         case durationMs = "duration_ms"
         case startUnixSecs = "start_unix_secs"
+        case isFinal = "is_final"
     }
 
     fileprivate func intoDialogueEvent() -> DialogueEvent {
@@ -274,7 +286,8 @@ private struct ClipEventPayload: Decodable {
             kindEnum = .inputClipEnded(
                 clipSeq: seq ?? 0,
                 durationMs: durationMs ?? 0,
-                path: path ?? ""
+                path: path ?? "",
+                transcript: transcript ?? ""
             )
         case "output_clip_started":
             kindEnum = .outputClipStarted(clipSeq: seq ?? 0, offsetMs: offsetMs ?? 0)
@@ -282,7 +295,20 @@ private struct ClipEventPayload: Decodable {
             kindEnum = .outputClipEnded(
                 clipSeq: seq ?? 0,
                 durationMs: durationMs ?? 0,
-                path: path ?? ""
+                path: path ?? "",
+                transcript: transcript ?? ""
+            )
+        case "input_clip_transcript":
+            kindEnum = .inputClipTranscript(
+                clipSeq: seq ?? 0,
+                text: text ?? "",
+                isFinal: isFinal ?? false
+            )
+        case "output_clip_transcript":
+            kindEnum = .outputClipTranscript(
+                clipSeq: seq ?? 0,
+                text: text ?? "",
+                isFinal: isFinal ?? false
             )
         default:
             kindEnum = .unknown(kind)

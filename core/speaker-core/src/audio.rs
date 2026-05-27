@@ -474,10 +474,12 @@ pub fn start_vad_diagnostic_with_engine(
                 if out.closed {
                     match recorder.end_clip(ClipDirection::In) {
                         Ok(end) => {
+                            let transcript = end.transcript.clone();
                             fire_clip_event(ClipEvent::InputClipEnded {
                                 seq: end.seq,
                                 duration_ms: secs_to_ms(end.duration_secs),
                                 path: end.path.to_string_lossy().into_owned(),
+                                transcript,
                             });
                         }
                         Err(e) => {
@@ -942,10 +944,12 @@ pub fn start_session(
                     let rec = SessionRecorder::instance();
                     match rec.end_clip(ClipDirection::Out) {
                         Ok(end) => {
+                            let transcript = end.transcript.clone();
                             fire_clip_event(ClipEvent::OutputClipEnded {
                                 seq: end.seq,
                                 duration_ms: secs_to_ms(end.duration_secs),
                                 path: end.path.to_string_lossy().into_owned(),
+                                transcript,
                             });
                         }
                         Err(e) => {
@@ -962,6 +966,48 @@ pub fn start_session(
                     // and the user can be heard again.
                     let now_ns = session_start.elapsed().as_nanos() as u64;
                     play_out_for_sink.store(now_ns, Ordering::SeqCst);
+                }
+            }
+            GeminiEvent::InputTranscript { text, is_final } => {
+                // Live's input transcription usually lands *after*
+                // activityEnd has already closed the input clip; the
+                // recorder's append_transcript handles both the open-clip
+                // and most-recently-finalized fallback. We forward a
+                // ClipEvent so the live UI can render text as it
+                // streams without waiting for the manifest flush — but
+                // only if we actually had something to attach to (the
+                // recorder returns the clip seq), otherwise the chunk
+                // is buffered for the next clip and there is nothing
+                // for the shell to render yet.
+                let rec = SessionRecorder::instance();
+                match rec.append_transcript(ClipDirection::In, &text, is_final) {
+                    Ok(Some(seq)) => {
+                        fire_clip_event(ClipEvent::InputClipTranscript {
+                            seq,
+                            text,
+                            is_final,
+                        });
+                    }
+                    Ok(None) => { /* nothing to attach to yet */ }
+                    Err(e) => {
+                        eprintln!("speaker-core: append input transcript failed: {e:?}");
+                    }
+                }
+            }
+            GeminiEvent::OutputTranscript { text, is_final } => {
+                let rec = SessionRecorder::instance();
+                match rec.append_transcript(ClipDirection::Out, &text, is_final) {
+                    Ok(Some(seq)) => {
+                        fire_clip_event(ClipEvent::OutputClipTranscript {
+                            seq,
+                            text,
+                            is_final,
+                        });
+                    }
+                    Ok(None) => { /* nothing to attach to yet */ }
+                    Err(e) => {
+                        eprintln!("speaker-core: append output transcript failed: {e:?}");
+                    }
                 }
             }
             GeminiEvent::Error(e) => {
@@ -1190,10 +1236,12 @@ pub fn start_session(
                     }
                     match recorder.end_clip(ClipDirection::In) {
                         Ok(end) => {
+                            let transcript = end.transcript.clone();
                             fire_clip_event(ClipEvent::InputClipEnded {
                                 seq: end.seq,
                                 duration_ms: secs_to_ms(end.duration_secs),
                                 path: end.path.to_string_lossy().into_owned(),
+                                transcript,
                             });
                         }
                         Err(e) => {

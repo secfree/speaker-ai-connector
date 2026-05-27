@@ -128,6 +128,15 @@ pub struct ClipMeta {
     /// WAV header is the source of truth for playback.
     #[serde(default)]
     pub sample_rate: u32,
+    /// Text transcript of the clip's audio. `None` on legacy manifests
+    /// (the field landed with issue #3) and on sessions recorded with the
+    /// `Nope` responder, which never produces transcripts. The Gemini
+    /// responder fills this from Live's `inputAudioTranscription` /
+    /// `outputAudioTranscription` opt-ins — partial chunks accumulate
+    /// in-memory and flush into this field as the recorder finalizes
+    /// the clip or receives the `is_final` marker.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
 }
 
 /// Returned by `begin_clip` — the live `DialogueView` needs the seq +
@@ -147,6 +156,11 @@ pub struct ClipEnd {
     pub offset_secs: f64,
     pub duration_secs: f64,
     pub path: PathBuf,
+    /// Whatever transcript text accumulated while the clip was open.
+    /// Empty when the responder produces no transcripts (`Nope`) or when
+    /// the input transcript hasn't landed yet — the late path attaches
+    /// it after the fact via `append_transcript`.
+    pub transcript: String,
 }
 
 /// Per-session activity surfaced to the shell via the coordinator's
@@ -171,6 +185,12 @@ pub enum ClipEvent {
         seq: u32,
         duration_ms: u64,
         path: String,
+        /// Transcript accumulated while the clip was open. Often empty
+        /// at this point — Live's input transcription arrives *after*
+        /// `activityEnd` closes the clip; the late text lands via a
+        /// follow-up `InputClipTranscript` instead.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        transcript: String,
     },
     OutputClipStarted {
         seq: u32,
@@ -180,6 +200,25 @@ pub enum ClipEvent {
         seq: u32,
         duration_ms: u64,
         path: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        transcript: String,
+    },
+    /// Transcript chunk for an input clip. `seq` identifies the clip
+    /// the recorder attached this chunk to (active clip if one is open
+    /// on this direction, otherwise the most-recently-finalized one).
+    /// `text` is the new chunk only — the UI concatenates by seq. The
+    /// recorder's manifest holds the full accumulated text; this event
+    /// only exists so the live UI can render text as it streams instead
+    /// of waiting for the manifest flush.
+    InputClipTranscript {
+        seq: u32,
+        text: String,
+        is_final: bool,
+    },
+    OutputClipTranscript {
+        seq: u32,
+        text: String,
+        is_final: bool,
     },
 }
 
@@ -208,6 +247,13 @@ struct ActiveClip {
     samples_written: u64,
     writer: WavWriter<BufWriter<File>>,
     file_name: String,
+    /// Transcript chunks accumulated while the clip is open. Flushed
+    /// into `ClipMeta.transcript` on `end_clip`, or attached to the most
+    /// recently finalized clip on the same direction when transcripts
+    /// land after the clip closes (Live's input transcript arrives
+    /// after `activityEnd`, so the post-close path is the common one
+    /// for input — see `append_transcript`).
+    transcript_buffer: String,
 }
 
 struct ActiveSession {
@@ -229,6 +275,15 @@ struct ActiveSession {
     /// state inside the audio path.
     active_in: Option<ActiveClip>,
     active_out: Option<ActiveClip>,
+    /// Late-arriving transcript chunks, keyed by direction. Live's input
+    /// transcription typically lands after `activityEnd` closes the
+    /// clip, so without this fallback the words would have nowhere to
+    /// go. Drained when a *new* clip on that direction opens (the new
+    /// clip then owns its own buffer) or attached to the most-recently
+    /// finalized clip of that direction immediately on arrival. See
+    /// `append_transcript`.
+    late_in_transcript: String,
+    late_out_transcript: String,
 }
 
 impl ActiveSession {
@@ -296,6 +351,8 @@ impl SessionRecorder {
             clips: Vec::new(),
             active_in: None,
             active_out: None,
+            late_in_transcript: String::new(),
+            late_out_transcript: String::new(),
         });
         Ok(id)
     }
@@ -323,6 +380,15 @@ impl SessionRecorder {
         let writer =
             WavWriter::create(&path, spec).map_err(|e| SessionError::Wav(e.to_string()))?;
         let offset = sess.start.elapsed().as_secs_f64();
+        // A fresh clip starts with whatever transcript chunks landed
+        // *after* the previous clip on this direction closed — Live's
+        // input transcript routinely arrives a beat after `activityEnd`.
+        // Without this hand-off the words would be silently dropped on
+        // the next `begin_clip`. The new clip then owns the buffer.
+        let carryover = match direction {
+            ClipDirection::In => std::mem::take(&mut sess.late_in_transcript),
+            ClipDirection::Out => std::mem::take(&mut sess.late_out_transcript),
+        };
         *sess.active_slot_mut(direction) = Some(ActiveClip {
             seq,
             direction,
@@ -331,6 +397,7 @@ impl SessionRecorder {
             samples_written: 0,
             writer,
             file_name,
+            transcript_buffer: carryover,
         });
         Ok(ClipBegin {
             seq,
@@ -356,6 +423,65 @@ impl SessionRecorder {
         }
         clip.samples_written = clip.samples_written.saturating_add(samples.len() as u64);
         Ok(())
+    }
+
+    /// Append a transcript chunk to the active clip on `direction`, or
+    /// — if no clip is currently open — to a per-direction late-arrival
+    /// buffer that gets attached to the *most recently finalized* clip
+    /// of that direction. Returns the seq of the clip the text was
+    /// attached to (active or most-recent), or `None` if there is no
+    /// clip to attach to yet (transcript arrived before the first clip
+    /// on that direction even started — should be rare).
+    ///
+    /// The "most-recently finalized" fallback is the common path for
+    /// Gemini input transcripts: Live emits them after `activityEnd`
+    /// closes the input clip on our side. For output transcripts the
+    /// active-clip path dominates, because audio + transcript stream
+    /// interleaved during the model burst.
+    ///
+    /// `is_final` is advisory — the recorder always accumulates and
+    /// always flushes on `end_clip`. The flag lets callers (and the
+    /// coordinator's `ClipEvent` pipeline) tell partial chunks apart
+    /// from "this is the last one for this turn", which is useful for
+    /// the live UI's italic-vs-plain styling but invisible on disk.
+    pub fn append_transcript(
+        &self,
+        direction: ClipDirection,
+        chunk: &str,
+        _is_final: bool,
+    ) -> Result<Option<u32>, SessionError> {
+        if chunk.is_empty() {
+            // The `finished: true` marker can arrive with empty text;
+            // there is nothing to append, but it isn't an error.
+            return Ok(None);
+        }
+        let mut guard = self.state.lock().unwrap();
+        let sess = guard.as_mut().ok_or(SessionError::NoActiveSession)?;
+        if let Some(active) = sess.active_slot_mut(direction).as_mut() {
+            active.transcript_buffer.push_str(chunk);
+            return Ok(Some(active.seq));
+        }
+        // No active clip — buffer for the next one *and* patch the most
+        // recent finalized clip on this direction so the UI shows the
+        // text immediately rather than only after the next clip opens.
+        match direction {
+            ClipDirection::In => sess.late_in_transcript.push_str(chunk),
+            ClipDirection::Out => sess.late_out_transcript.push_str(chunk),
+        }
+        let recent_seq = sess
+            .clips
+            .iter_mut()
+            .rev()
+            .find(|c| c.direction == direction)
+            .map(|c| {
+                let merged = match c.transcript.take() {
+                    Some(existing) => existing + chunk,
+                    None => chunk.to_string(),
+                };
+                c.transcript = Some(merged);
+                c.seq
+            });
+        Ok(recent_seq)
     }
 
     pub fn end_clip(&self, direction: ClipDirection) -> Result<ClipEnd, SessionError> {
@@ -500,6 +626,7 @@ fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<ClipEnd, 
         samples_written,
         writer,
         file_name,
+        transcript_buffer,
     } = clip;
     // Duration is samples / sample_rate so the manifest agrees with what a
     // player decodes from the WAV header. Wall-clock would drift whenever
@@ -514,6 +641,11 @@ fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<ClipEnd, 
         .finalize()
         .map_err(|e| SessionError::Wav(e.to_string()))?;
     let path = sess.dir.join(&file_name);
+    let transcript_opt = if transcript_buffer.is_empty() {
+        None
+    } else {
+        Some(transcript_buffer.clone())
+    };
     sess.clips.push(ClipMeta {
         seq,
         direction,
@@ -521,6 +653,7 @@ fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<ClipEnd, 
         duration_secs: duration,
         file: file_name,
         sample_rate,
+        transcript: transcript_opt,
     });
     // next_seq is bumped at begin_clip; finalise just commits the metadata.
     Ok(ClipEnd {
@@ -529,6 +662,7 @@ fn finalize_clip(sess: &mut ActiveSession, clip: ActiveClip) -> Result<ClipEnd, 
         offset_secs,
         duration_secs: duration,
         path,
+        transcript: transcript_buffer,
     })
 }
 
@@ -747,6 +881,103 @@ mod tests {
         let dirs: Vec<_> = clips.iter().map(|c| c.direction).collect();
         assert!(dirs.contains(&ClipDirection::In));
         assert!(dirs.contains(&ClipDirection::Out));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn append_transcript_to_active_clip_persists_to_manifest() {
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let id = rec
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
+            .unwrap();
+        rec.begin_clip(ClipDirection::Out, 24_000).unwrap();
+        // Two partial chunks then a final one — they concatenate.
+        let s1 = rec.append_transcript(ClipDirection::Out, "Hello ", false).unwrap();
+        let s2 = rec.append_transcript(ClipDirection::Out, "there!", true).unwrap();
+        assert_eq!(s1, Some(1));
+        assert_eq!(s2, Some(1));
+        rec.write_frames(ClipDirection::Out, &vec![0i16; 24_000]).unwrap();
+        let end = rec.end_clip(ClipDirection::Out).unwrap();
+        assert_eq!(end.transcript, "Hello there!");
+        rec.end_session().unwrap();
+
+        let clips = rec.list_clips(&id).unwrap();
+        assert_eq!(clips[0].transcript.as_deref(), Some("Hello there!"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn append_transcript_after_end_clip_patches_most_recent() {
+        // Live's input transcription routinely arrives *after*
+        // activityEnd closes the input clip. The fallback path attaches
+        // to the most recently finalized clip on that direction.
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let id = rec
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
+            .unwrap();
+        rec.begin_clip(ClipDirection::In, 16_000).unwrap();
+        rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
+        let end = rec.end_clip(ClipDirection::In).unwrap();
+        // No transcript at close time — chunks arrive late.
+        assert_eq!(end.transcript, "");
+
+        let s1 = rec
+            .append_transcript(ClipDirection::In, "what time is it", true)
+            .unwrap();
+        assert_eq!(s1, Some(end.seq));
+        rec.end_session().unwrap();
+
+        let clips = rec.list_clips(&id).unwrap();
+        assert_eq!(clips[0].transcript.as_deref(), Some("what time is it"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn late_transcript_carries_over_to_next_clip_on_same_direction() {
+        // Edge case: a transcript chunk lands after a clip closes but
+        // before the *next* clip on the same direction starts. The
+        // chunk first patches the most-recent clip; the carryover into
+        // the next clip is a defensive secondary — exercised here so the
+        // mechanism doesn't bitrot.
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let id = rec
+            .start_session(SessionTrigger::Manual, None, 16_000, ResponderKind::Gemini)
+            .unwrap();
+        rec.begin_clip(ClipDirection::In, 16_000).unwrap();
+        rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
+        rec.end_clip(ClipDirection::In).unwrap();
+        rec.append_transcript(ClipDirection::In, "first turn", true).unwrap();
+
+        rec.begin_clip(ClipDirection::In, 16_000).unwrap();
+        // The new clip starts seeded with the late chunk in its buffer
+        // — the recorder flushes that on close.
+        rec.write_frames(ClipDirection::In, &vec![0i16; 320]).unwrap();
+        let end2 = rec.end_clip(ClipDirection::In).unwrap();
+        // The most-recent-patch wrote to clip 1's transcript; the
+        // carryover then also moved into clip 2's buffer (defense in
+        // depth). Both clips end up labelled — acceptable, since the
+        // alternative is silently dropping text.
+        assert_eq!(end2.transcript, "first turn");
+        rec.end_session().unwrap();
+
+        let clips = rec.list_clips(&id).unwrap();
+        assert_eq!(clips.len(), 2);
+        assert_eq!(clips[0].transcript.as_deref(), Some("first turn"));
+        assert_eq!(clips[1].transcript.as_deref(), Some("first turn"));
+        cleanup(&root);
+    }
+
+    #[test]
+    fn append_transcript_with_no_active_session_errors() {
+        let root = tmp_root();
+        let rec = SessionRecorder::new(root.clone());
+        let err = rec
+            .append_transcript(ClipDirection::In, "hi", false)
+            .unwrap_err();
+        assert!(matches!(err, SessionError::NoActiveSession));
         cleanup(&root);
     }
 

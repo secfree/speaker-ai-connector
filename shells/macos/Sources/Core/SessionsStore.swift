@@ -39,6 +39,13 @@ struct ClipInfo: Identifiable, Hashable, Decodable {
     let offsetSecs: Double
     let durationSecs: Double
     let file: String
+    /// Server-side STT of this clip's audio (input = user's voice,
+    /// output = Gemini's spoken reply). `nil` for legacy manifests
+    /// (the field landed with issue #3), for `Nope`-responder
+    /// sessions, and on clips Gemini Live never returned a transcript
+    /// for. Rendered as a quoted block under the duration in the
+    /// Sessions detail view.
+    let transcript: String?
 
     enum CodingKeys: String, CodingKey {
         case seq
@@ -46,6 +53,7 @@ struct ClipInfo: Identifiable, Hashable, Decodable {
         case offsetSecs = "offset_secs"
         case durationSecs = "duration_secs"
         case file
+        case transcript
     }
 }
 

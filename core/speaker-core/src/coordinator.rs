@@ -543,6 +543,12 @@ impl Coordinator {
                 inner.gate_open = false;
                 inner.responding = false;
             }
+            // Transcripts arrive interleaved with the other events;
+            // they don't change gate_open/responding — those are driven
+            // by the clip lifecycle. The event itself is appended to
+            // the log below so the live UI repaints.
+            ClipEvent::InputClipTranscript { .. }
+            | ClipEvent::OutputClipTranscript { .. } => {}
             ClipEvent::SessionStarted { .. } => {}
         }
         inner.clip_event_seq += 1;
@@ -829,16 +835,37 @@ mod tests {
             seq: 1,
             duration_ms: 800,
             path: "/tmp/0001-in.wav".into(),
+            transcript: String::new(),
         });
         let snap = coord.status_snapshot();
         assert!(!snap.gate_open, "InputClipEnded closes the gate");
 
+        // Transcript events arrive after the clip closes; they must not
+        // re-open the gate or flip the responding flag.
+        coord.on_clip_event(ClipEvent::InputClipTranscript {
+            seq: 1,
+            text: "hi".into(),
+            is_final: true,
+        });
+        let snap = coord.status_snapshot();
+        assert!(!snap.gate_open, "InputClipTranscript leaves the gate closed");
+        assert!(!snap.responding);
+
         coord.on_clip_event(ClipEvent::OutputClipStarted { seq: 1, offset_ms: 1200 });
+        assert!(coord.status_snapshot().responding);
+        coord.on_clip_event(ClipEvent::OutputClipTranscript {
+            seq: 1,
+            text: "hello there".into(),
+            is_final: true,
+        });
+        // Still responding — the audio clip closes on TurnComplete, not
+        // on the transcript boundary.
         assert!(coord.status_snapshot().responding);
         coord.on_clip_event(ClipEvent::OutputClipEnded {
             seq: 1,
             duration_ms: 600,
             path: "/tmp/0002-out.wav".into(),
+            transcript: "hello there".into(),
         });
         assert!(!coord.status_snapshot().responding);
 
