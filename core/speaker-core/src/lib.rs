@@ -13,6 +13,7 @@ pub mod ffi;
 // Placeholders — filled in by later milestones.
 pub mod audio;
 pub mod config;
+pub mod daily_cap;
 pub mod gemini;
 pub mod last_error;
 pub mod responder;

@@ -44,6 +44,22 @@ pub fn set_other(message: &str) {
     });
 }
 
+/// Record a daily-cap-reached event (issue #9). The audio path uses
+/// this to (a) refuse to launch a new session when today's count is
+/// already at/above the cap, and (b) tear down a running session as
+/// soon as the next VAD-opened input clip would push it over. The
+/// shell renders the message as the menu-bar error so the user knows
+/// why their speech isn't getting answered.
+pub fn set_daily_cap_reached(cap: u32, count: u32) {
+    *slot().lock().unwrap() = Some(LastError {
+        tag: "daily_cap_reached",
+        code: -305,
+        message: format!(
+            "Daily input-clip cap reached ({count}/{cap}) — open Settings to raise the cap or reset today's count"
+        ),
+    });
+}
+
 pub fn take() -> Option<LastError> {
     slot().lock().unwrap().take()
 }

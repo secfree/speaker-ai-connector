@@ -107,12 +107,13 @@ int speaker_core_manual_session_start(unsigned char sensitivity, const char *mod
 // Idempotent — safe to call when no manual session is running.
 void speaker_core_manual_session_stop(void);
 
-// Last asynchronous session error (set by the Gemini WS task). Polled
-// by the shell after the session ends to render a typed menu-bar
-// message. Codes mirror the start function's table; tag is stable
-// machine-readable ("no_api_key" / "auth_failed" / "network" /
-// "safety_blocked" / "other"). Strings are NUL-terminated UTF-8 and
-// the caller frees them with speaker_core_string_free.
+// Last asynchronous session error (set by the Gemini WS task or the
+// audio path when the daily cap kicks in). Polled by the shell after
+// the session ends to render a typed menu-bar message. Codes mirror
+// the start function's table; tag is stable machine-readable
+// ("no_api_key" / "auth_failed" / "network" / "safety_blocked" /
+// "daily_cap_reached" / "other"). Strings are NUL-terminated UTF-8
+// and the caller frees them with speaker_core_string_free.
 
 int speaker_core_last_session_error_code(void);
 char *speaker_core_last_session_error_message(void);
@@ -145,7 +146,10 @@ void speaker_core_last_session_error_clear(void);
 //       { "event_seq": 5, "kind": "output_clip_ended", "seq": 1,
 //         "duration_ms": 1500, "path": "/abs/path/...wav" },
 //       { "event_seq": 6, "kind": "session_ended" }
-//     ]
+//     ],
+//     "daily_input_clip_count": 12,           (issue #9; today's UTC count)
+//     "daily_input_clip_cap": 50,             (issue #9; 0 = unlimited)
+//     "daily_input_clip_cap_reached": false   (issue #9)
 //   }
 //
 // The revision counter bumps on both state-machine transitions AND
@@ -212,5 +216,13 @@ int speaker_core_settings_set_auto_session_on_bt_connect(unsigned char enabled);
 // from the prompt.
 int speaker_core_settings_set_main_language(const char *language);
 int speaker_core_settings_set_alternative_language(const char *language); // NULL clears
+// Issue #9: per-day cap on input audio clips uploaded. 0 = unlimited
+// (the default). The status snapshot exposes today's count + a
+// `daily_input_clip_cap_reached` bool so the UI can badge the row.
+int speaker_core_settings_set_daily_input_clip_cap(unsigned int cap);
+
+// Issue #9: reset today's input-clip counter to zero. Lets the user
+// lift cap suppression mid-day without raising the cap. Idempotent.
+void speaker_core_daily_cap_reset(void);
 
 #endif

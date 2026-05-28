@@ -24,6 +24,7 @@ use crate::last_error;
 use crate::responder::{ResponderInit, ResponderSession};
 use crate::sessions::{ClipDirection, ClipEvent, SessionRecorder, SessionTrigger};
 use crate::config::{Settings, VadEngineKind};
+use crate::coordinator::Coordinator;
 use crate::vad::{VadRelay, WebRtcSensitivity};
 
 #[derive(Debug)]
@@ -38,6 +39,11 @@ pub enum AudioError {
     AlreadyRunning,
     VadInit(String),
     Gemini(GeminiError),
+    /// Today's input-clip count is already at or over the configured
+    /// `daily_input_clip_cap`. Issue #9. Surfaces as the typed
+    /// `daily_cap_reached` last_error so the shell can render a
+    /// specific message.
+    DailyCapReached,
 }
 
 impl AudioError {
@@ -56,6 +62,9 @@ impl AudioError {
             AudioError::StreamStartFailed(_) => -8,
             AudioError::AlreadyRunning => -9,
             AudioError::VadInit(_) => -10,
+            // Mirrors `last_error`'s `-305` so the menu-bar message and
+            // the synchronous start-FFI return code agree.
+            AudioError::DailyCapReached => -305,
             // Pass-through — the underlying Gemini code carries its own
             // typed identity (NoApiKey / AuthFailed / Network / …).
             AudioError::Gemini(e) => e.code(),
@@ -805,6 +814,24 @@ pub fn start_session(
     }
     last_error::clear();
 
+    // Issue #9: refuse to open a session that's already at its daily
+    // cap. Catching it here avoids spinning up the recorder + Gemini WS
+    // just to tear them down on the first VAD-opened clip. `cap == 0`
+    // means unlimited, so the count check is skipped in that case.
+    {
+        let cap = Settings::current().daily_input_clip_cap;
+        if cap > 0 {
+            let count = crate::daily_cap::snapshot().count;
+            if count >= cap {
+                eprintln!(
+                    "speaker-core: refusing to start session — daily cap reached ({count}/{cap})"
+                );
+                last_error::set_daily_cap_reached(cap, count);
+                return Err(AudioError::DailyCapReached);
+            }
+        }
+    }
+
     let host = cpal::default_host();
     let (input_device, input_cfg) = resolve_default_input(&host)?;
     let (output_device, output_cfg) = resolve_default_output(&host)?;
@@ -1112,6 +1139,12 @@ pub fn start_session(
     // Latches to log echo-guard suppression once per burst rather than
     // once per cpal buffer.
     let echo_guard_log_armed = Arc::new(AtomicBool::new(true));
+    // Issue #9: when the daily input-clip cap is reached, we suppress the
+    // entire VAD-opened clip — no activity_start, no begin_clip, no
+    // upload, no recorder writes — until the gate closes again. The flag
+    // persists across cpal callbacks because OPEN and CLOSE can land in
+    // separate buffers.
+    let mut clip_suppressed: bool = false;
     let input_stream = input_device
         .build_input_stream(
             &in_stream_cfg,
@@ -1185,6 +1218,31 @@ pub fn start_session(
                     }
                 };
                 if out.opened {
+                    // Charge one against the daily cap before doing any
+                    // upload work. `try_consume` reads `cap` fresh from
+                    // Settings each time so a mid-session change takes
+                    // effect on the next clip. `cap == 0` is unlimited;
+                    // the counter still bumps so the UI can show usage.
+                    let cap = Settings::current().daily_input_clip_cap;
+                    let allowed = crate::daily_cap::try_consume(cap);
+                    if !allowed {
+                        // Cap reached — silently dropping audio reads
+                        // as "the mic is broken" to the user. Tear the
+                        // session down instead so the menu bar can
+                        // surface the typed `daily_cap_reached` error
+                        // and the speaker isn't held open burning HFP
+                        // for no answer. Issue #9 follow-up.
+                        let count = crate::daily_cap::snapshot().count;
+                        eprintln!(
+                            "speaker-core: vad gate OPEN [{score}] — daily cap {cap} reached at {count}, tearing down session",
+                            score = relay.score_label()
+                        );
+                        last_error::set_daily_cap_reached(cap, count);
+                        clip_suppressed = true;
+                        schedule_manual_teardown(&dead_for_input);
+                        return;
+                    }
+                    clip_suppressed = false;
                     eprintln!(
                         "speaker-core: vad gate OPEN [{score}]",
                         score = relay.score_label()
@@ -1207,45 +1265,64 @@ pub fn start_session(
                             eprintln!("speaker-core: manual begin_clip(In) failed: {e:?}");
                         }
                     }
+                    // Refresh the snapshot so the Settings count
+                    // reflects the new clip without waiting for the
+                    // next status poll tick.
+                    Coordinator::instance().bump_daily_cap_revision();
                 }
-                for frame in &out.frames {
-                    if let Err(e) = recorder.write_frames(ClipDirection::In, frame) {
-                        eprintln!("speaker-core: manual write_frames(In) failed: {e:?}");
-                        break;
-                    }
-                    if let Err(e) = upload_handle.send(frame) {
-                        // Channel closed — Gemini session is gone. Don't
-                        // tear the audio path down from inside the cpal
-                        // callback; the teardown thread spawned from the
-                        // sink does that.
-                        log_upload_err(e);
-                        break;
+                if !clip_suppressed {
+                    for frame in &out.frames {
+                        if let Err(e) = recorder.write_frames(ClipDirection::In, frame) {
+                            eprintln!("speaker-core: manual write_frames(In) failed: {e:?}");
+                            break;
+                        }
+                        if let Err(e) = upload_handle.send(frame) {
+                            // Channel closed — Gemini session is gone. Don't
+                            // tear the audio path down from inside the cpal
+                            // callback; the teardown thread spawned from the
+                            // sink does that.
+                            log_upload_err(e);
+                            break;
+                        }
                     }
                 }
                 if out.closed {
-                    eprintln!(
-                        "speaker-core: vad gate CLOSED [{score}]",
-                        score = relay.score_label()
-                    );
-                    // activityEnd goes out *after* the last speech frame
-                    // in this batch; the write task flushes any pending
-                    // audio before emitting the marker so the server
-                    // decodes a complete utterance.
-                    if let Err(e) = upload_handle.activity_end() {
-                        log_upload_err(e);
-                    }
-                    match recorder.end_clip(ClipDirection::In) {
-                        Ok(end) => {
-                            let transcript = end.transcript.clone();
-                            fire_clip_event(ClipEvent::InputClipEnded {
-                                seq: end.seq,
-                                duration_ms: secs_to_ms(end.duration_secs),
-                                path: end.path.to_string_lossy().into_owned(),
-                                transcript,
-                            });
+                    if clip_suppressed {
+                        // Mirror of the OPEN suppression — the cap was
+                        // hit, so there's nothing to close out (no
+                        // activity_end, no end_clip, no transcript).
+                        // Reset the flag so the next gate-open is judged
+                        // against today's count afresh.
+                        eprintln!(
+                            "speaker-core: vad gate CLOSED [{score}] — suppressed clip discarded",
+                            score = relay.score_label()
+                        );
+                        clip_suppressed = false;
+                    } else {
+                        eprintln!(
+                            "speaker-core: vad gate CLOSED [{score}]",
+                            score = relay.score_label()
+                        );
+                        // activityEnd goes out *after* the last speech frame
+                        // in this batch; the write task flushes any pending
+                        // audio before emitting the marker so the server
+                        // decodes a complete utterance.
+                        if let Err(e) = upload_handle.activity_end() {
+                            log_upload_err(e);
                         }
-                        Err(e) => {
-                            eprintln!("speaker-core: manual end_clip(In) failed: {e:?}");
+                        match recorder.end_clip(ClipDirection::In) {
+                            Ok(end) => {
+                                let transcript = end.transcript.clone();
+                                fire_clip_event(ClipEvent::InputClipEnded {
+                                    seq: end.seq,
+                                    duration_ms: secs_to_ms(end.duration_secs),
+                                    path: end.path.to_string_lossy().into_owned(),
+                                    transcript,
+                                });
+                            }
+                            Err(e) => {
+                                eprintln!("speaker-core: manual end_clip(In) failed: {e:?}");
+                            }
                         }
                     }
                 }

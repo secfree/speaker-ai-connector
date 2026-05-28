@@ -142,6 +142,8 @@ struct SettingsView: View {
                 Text("On by default — connecting the speaker launches an AI session right away. Turn off to use the speaker just for music; you can still start a session manually from the menu bar.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                dailyCapRow
             }
 
             Section("Startup") {
@@ -268,7 +270,7 @@ struct SettingsView: View {
             }
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: 620)
         .onAppear { refreshDevices() }
         .onReceive(pickerRefresh) { _ in refreshDevices() }
     }
@@ -296,6 +298,59 @@ struct SettingsView: View {
         // something to open on a fresh install.
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         NSWorkspace.shared.activateFileViewerSelecting([root])
+    }
+
+    /// Daily input-clip cap row. Bound to a string draft so an empty
+    /// value reads as "0 = unlimited" without the keyboard fighting
+    /// the user. Each control is emitted as its own Form row so the
+    /// Form's automatic label column handles alignment — wrapping the
+    /// label + field in an HStack inside a Form pushes the label into
+    /// the value column and clips it off the left edge. Issue #9.
+    private var dailyCapBinding: Binding<String> {
+        Binding<String>(
+            get: {
+                coordinator.dailyInputClipCap == 0
+                    ? ""
+                    : String(coordinator.dailyInputClipCap)
+            },
+            set: { newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespaces)
+                if trimmed.isEmpty {
+                    coordinator.dailyInputClipCap = 0
+                } else if let n = UInt32(trimmed) {
+                    coordinator.dailyInputClipCap = n
+                }
+                // Non-numeric input is ignored — the field stays at the
+                // last valid value rather than silently zeroing the cap.
+            }
+        )
+    }
+
+    private var dailyCountText: String {
+        coordinator.dailyInputClipCap == 0
+            ? "Today: \(coordinator.dailyInputClipCount)"
+            : "Today: \(coordinator.dailyInputClipCount) / \(coordinator.dailyInputClipCap)"
+    }
+
+    @ViewBuilder
+    private var dailyCapRow: some View {
+        TextField("Daily input clip cap", text: dailyCapBinding, prompt: Text("0 = unlimited"))
+            .textFieldStyle(.roundedBorder)
+        HStack {
+            Text(dailyCountText)
+                .font(.caption)
+                .foregroundStyle(coordinator.dailyInputClipCapReached
+                                 ? AnyShapeStyle(Color.red)
+                                 : AnyShapeStyle(.secondary))
+            Spacer()
+            Button("Reset today's count") {
+                coordinator.resetDailyInputClipCount()
+            }
+            .font(.caption)
+        }
+        Text("Hard ceiling on input clips uploaded per day (UTC). 0 means unlimited — VAD gating already keeps idle sessions free. When the cap is reached, the session stays open but further input clips are silently dropped until the next day.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     /// 0–1 slider snapped to 0.05 steps, persisted as the underlying

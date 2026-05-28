@@ -173,6 +173,7 @@ private struct SettingsPayload: Decodable {
     let autoSessionOnBtConnect: Bool?
     let mainLanguage: String?
     let alternativeLanguage: String?
+    let dailyInputClipCap: UInt32?
 
     enum CodingKeys: String, CodingKey {
         case targetAddress = "target_address"
@@ -186,6 +187,7 @@ private struct SettingsPayload: Decodable {
         case autoSessionOnBtConnect = "auto_session_on_bt_connect"
         case mainLanguage = "main_language"
         case alternativeLanguage = "alternative_language"
+        case dailyInputClipCap = "daily_input_clip_cap"
     }
 }
 
@@ -201,12 +203,18 @@ private struct StatusPayload: Decodable {
     let gateOpen: Bool?
     let responding: Bool?
     let clipEvents: [ClipEventPayload]?
+    let dailyInputClipCount: UInt32?
+    let dailyInputClipCap: UInt32?
+    let dailyInputClipCapReached: Bool?
 
     enum CodingKeys: String, CodingKey {
         case variant, name, message, revision
         case gateOpen = "gate_open"
         case responding
         case clipEvents = "clip_events"
+        case dailyInputClipCount = "daily_input_clip_count"
+        case dailyInputClipCap = "daily_input_clip_cap"
+        case dailyInputClipCapReached = "daily_input_clip_cap_reached"
     }
 }
 
@@ -391,6 +399,18 @@ final class Coordinator: ObservableObject {
     @Published var alternativeLanguage: String {
         didSet { if oldValue != alternativeLanguage { persistAlternativeLanguage() } }
     }
+    /// Per-day cap on input audio clips uploaded. `0` means unlimited
+    /// (the default). VAD already prevents idle uploads; this is a
+    /// belt-and-braces cost guardrail. Issue #9.
+    @Published var dailyInputClipCap: UInt32 {
+        didSet { if oldValue != dailyInputClipCap { persistDailyInputClipCap() } }
+    }
+    /// Today's input-clip count (UTC day), surfaced from the status
+    /// snapshot. Read-only — the audio path bumps it as clips upload.
+    @Published private(set) var dailyInputClipCount: UInt32 = 0
+    /// True when `dailyInputClipCap > 0` and `dailyInputClipCount >= cap`.
+    /// The settings UI uses this to badge the row red.
+    @Published private(set) var dailyInputClipCapReached: Bool = false
 
     let watcher = BluetoothWatcher()
 
@@ -426,6 +446,7 @@ final class Coordinator: ObservableObject {
         self.autoSessionOnBtConnect = true
         self.mainLanguage = "English"
         self.alternativeLanguage = ""
+        self.dailyInputClipCap = 0
         apiKeyStored = (speaker_core_api_key_has() == 1)
         loadSettings()
         loginItemEnabled = LoginItem.isEnabled()
@@ -468,6 +489,7 @@ final class Coordinator: ObservableObject {
             // core stores `Option<String>` and SwiftUI binds against a
             // non-optional empty-string convention.
             self.alternativeLanguage = p.alternativeLanguage ?? ""
+            self.dailyInputClipCap = p.dailyInputClipCap ?? 0
             // Push the loaded target into the BT watcher so events get
             // filtered correctly from first launch.
             watcher.targetAddress = p.targetAddress
@@ -540,6 +562,20 @@ final class Coordinator: ObservableObject {
         guard !mainLanguage.isEmpty else { return }
         let rc = mainLanguage.withCString { speaker_core_settings_set_main_language($0) }
         if rc != 0 { log.error("settings_set_main_language failed: \(rc)") }
+    }
+
+    private func persistDailyInputClipCap() {
+        guard !loadingSettings else { return }
+        let rc = speaker_core_settings_set_daily_input_clip_cap(dailyInputClipCap)
+        if rc != 0 { log.error("settings_set_daily_input_clip_cap failed: \(rc)") }
+    }
+
+    /// Reset today's input-clip counter to zero. Wired to the "Reset
+    /// today's count" button in Settings so the user can lift cap
+    /// suppression mid-day without raising the cap. Issue #9.
+    func resetDailyInputClipCount() {
+        speaker_core_daily_cap_reset()
+        refreshStatusFromCore()
     }
 
     private func persistAlternativeLanguage() {
@@ -892,6 +928,8 @@ final class Coordinator: ObservableObject {
             status = Self.statusEvent(from: p)
             gateOpen = p.gateOpen ?? false
             responding = p.responding ?? false
+            dailyInputClipCount = p.dailyInputClipCount ?? 0
+            dailyInputClipCapReached = p.dailyInputClipCapReached ?? false
             let events = (p.clipEvents ?? []).map { $0.intoDialogueEvent() }
             dialogueEvents = events
             // Pull the active session header off the most recent
@@ -947,6 +985,7 @@ final class Coordinator: ObservableObject {
         case -301: return "Gemini auth failed — check API key"
         case -302: return "Network error — will retry on next connect"
         case -303: return "Gemini blocked the response (safety)"
+        case -305: return "Daily input-clip cap reached — open Settings"
         case -101: return "Invalid VAD sensitivity"
         default: return "Session failed (code \(code))"
         }

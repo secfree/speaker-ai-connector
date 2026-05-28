@@ -184,6 +184,16 @@ pub struct Settings {
     /// the child just spoke. `None` keeps the prompt single-language.
     #[serde(default)]
     pub alternative_language: Option<String>,
+    /// Maximum number of input audio clips that may be uploaded to the
+    /// responder per local calendar day. `0` means unlimited (the
+    /// default — VAD gating already keeps idle sessions free). Issue #9.
+    ///
+    /// The count is tracked persistently in `daily_cap.rs` and reset on
+    /// the first clip of a new local day. When the cap is reached, the
+    /// audio path silently suppresses further input clips (no upload, no
+    /// recording) until the next day.
+    #[serde(default)]
+    pub daily_input_clip_cap: u32,
 }
 
 fn default_model() -> String {
@@ -220,6 +230,7 @@ impl Default for Settings {
             auto_session_on_bt_connect: default_auto_session_on_bt_connect(),
             main_language: default_main_language(),
             alternative_language: None,
+            daily_input_clip_cap: 0,
         }
     }
 }
@@ -303,6 +314,7 @@ mod tests {
             auto_session_on_bt_connect: false,
             main_language: "Mandarin Chinese".into(),
             alternative_language: Some("English".into()),
+            daily_input_clip_cap: 25,
         };
         let text = toml::to_string_pretty(&s).unwrap();
         let parsed: Settings = toml::from_str(&text).unwrap();
@@ -385,6 +397,21 @@ model = "models/gemini-test"
         .unwrap();
         assert_eq!(parsed.main_language, "English");
         assert_eq!(parsed.alternative_language, None);
+    }
+
+    #[test]
+    fn daily_input_clip_cap_defaults_to_unlimited_for_older_configs() {
+        // Pre-issue-#9 configs predate the field — `#[serde(default)]`
+        // upgrades them to `0` (unlimited), matching the prior implicit
+        // behavior where VAD gating was the only cost control.
+        let parsed: Settings = toml::from_str(
+            r#"
+target_address = "aa:bb:cc:dd:ee:ff"
+model = "models/gemini-test"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.daily_input_clip_cap, 0);
     }
 
     #[test]

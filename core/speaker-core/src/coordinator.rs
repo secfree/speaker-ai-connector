@@ -162,6 +162,14 @@ pub struct StatusSnapshot {
     pub clip_events: Vec<RecordedEvent>,
     pub gate_open: bool,
     pub responding: bool,
+    /// Today's input-clip count (UTC day) and the configured cap. The
+    /// Settings UI renders "X / Y today"; the cap is mirrored here
+    /// rather than re-read from disk so the snapshot is self-contained.
+    /// Issue #9.
+    pub daily_input_clip_count: u32,
+    pub daily_input_clip_cap: u32,
+    /// True when the cap is reached. `false` when `cap == 0` (unlimited).
+    pub daily_input_clip_cap_reached: bool,
 }
 
 impl Inner {
@@ -251,13 +259,29 @@ impl Coordinator {
     /// `clip_events` off the snapshot and dedupes by `seq`.
     pub fn status_snapshot(&self) -> StatusSnapshot {
         let inner = self.inner.lock().unwrap();
+        let cap = inner.settings.daily_input_clip_cap;
+        let today = crate::daily_cap::snapshot();
+        let reached = cap > 0 && today.count >= cap;
         StatusSnapshot {
             status: inner.status(),
             revision: inner.revision,
             clip_events: inner.clip_events.clone(),
             gate_open: inner.gate_open,
             responding: inner.responding,
+            daily_input_clip_count: today.count,
+            daily_input_clip_cap: cap,
+            daily_input_clip_cap_reached: reached,
         }
+    }
+
+    /// Bump the revision counter so a polling shell knows to refetch
+    /// the snapshot. Called from the audio path each time the daily
+    /// input-clip counter changes (one successful or suppressed clip
+    /// open). Cheaper than rebuilding the whole status — the snapshot
+    /// reads `daily_cap::snapshot()` fresh anyway.
+    pub fn bump_daily_cap_revision(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.revision += 1;
     }
 
     pub fn revision(&self) -> u64 {
@@ -662,6 +686,14 @@ impl Coordinator {
             }
             Err(audio::AudioError::Gemini(e)) => {
                 last_error::set(&e);
+                self.fail_launch();
+            }
+            Err(audio::AudioError::DailyCapReached) => {
+                // `start_session` already wrote the typed `daily_cap_reached`
+                // entry to `last_error`; skip the catch-all `set_other`
+                // below so the menu bar shows the specific message
+                // instead of "audio: DailyCapReached".
+                eprintln!("speaker-core: session launch refused — daily cap reached");
                 self.fail_launch();
             }
             Err(e) => {

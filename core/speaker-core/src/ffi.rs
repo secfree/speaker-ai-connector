@@ -858,6 +858,32 @@ pub extern "C" fn speaker_core_settings_set_main_language(language: *const c_cha
     }
 }
 
+/// Maximum number of input audio clips that may be uploaded per local
+/// (UTC) day. `0` is unlimited. Persisted to TOML. Returns 0 on success
+/// or a negative `ConfigError::code()`. Issue #9.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_daily_input_clip_cap(cap: u32) -> i32 {
+    match Settings::update(|s| s.daily_input_clip_cap = cap) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            // Force the next status snapshot to repaint the count line
+            // so the user sees the new cap immediately.
+            Coordinator::instance().bump_daily_cap_revision();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Reset today's input-clip counter to zero. Wired to the "Reset" button
+/// next to the daily-cap field in Settings so the user can lift
+/// suppression mid-day without raising the cap. Issue #9.
+#[no_mangle]
+pub extern "C" fn speaker_core_daily_cap_reset() {
+    crate::daily_cap::reset();
+    Coordinator::instance().bump_daily_cap_revision();
+}
+
 /// Optional secondary language. Pass null or empty to clear, in which
 /// case the prompt drops the "or alternative" clause. Returns 0 on
 /// success or a negative `ConfigError::code()`. Issue #1.
