@@ -2,11 +2,11 @@
 
 Screen-free AI for kids: when a configured Bluetooth speaker connects to your Mac, this menu-bar app auto-opens a Gemini Live voice session bridged to the speaker's mic and output — no phone, no screen, no parent in the loop.
 
-> Status: v0.1 macOS only. The Rust core is portable; the Windows shell is the next version.
+> Status: currently macOS only. The Rust core is portable; the Windows version is planned.
 
-| Menu bar | Live session |
-| --- | --- |
-| ![Menu bar](docs/images/menu-bar.png) | ![Live session](docs/images/live-session.png) |
+| Menu bar | Live session | Settings |
+| --- | --- | --- |
+| ![Menu bar](docs/images/menu-bar.png) | ![Live session](docs/images/live-session.png) | ![Settings](docs/images/settings.png) |
 
 ## What works today
 
