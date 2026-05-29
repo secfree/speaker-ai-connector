@@ -119,6 +119,7 @@ struct SessionsView: View {
             }
         }
         .listStyle(.sidebar)
+        .navigationSplitViewColumnWidth(min: 200, ideal: 240, max: 320)
         .navigationTitle("Sessions")
         .toolbar {
             ToolbarItem {
@@ -441,11 +442,9 @@ private struct SessionRow: View {
                     LiveBadge()
                 }
             }
-            HStack(spacing: 8) {
-                Text(session.trigger.capitalized)
-                Text("·")
-                Text(formatResponder(session.responder))
-                Text("·")
+            HStack(spacing: 6) {
+                Image(systemName: session.trigger == "manual" ? "hand.tap" : "speaker.wave.2")
+                    .help(session.trigger.capitalized)
                 Text("\(session.clipCount) clip\(session.clipCount == 1 ? "" : "s")")
                 if session.clipDurationSecs > 0 {
                     Text("·")
@@ -454,6 +453,7 @@ private struct SessionRow: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            .lineLimit(1)
         }
         .padding(.vertical, 2)
     }
@@ -811,7 +811,10 @@ private let sessionSectionDateFormatter: DateFormatter = {
 }()
 
 private func formatSectionDate(_ day: Date) -> String {
-    sessionSectionDateFormatter.string(from: day)
+    let cal = Calendar.current
+    if cal.isDateInToday(day) { return "Today" }
+    if cal.isDateInYesterday(day) { return "Yesterday" }
+    return sessionSectionDateFormatter.string(from: day)
 }
 
 private func formatDuration(_ secs: Double) -> String {
