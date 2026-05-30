@@ -20,7 +20,7 @@ use directories::ProjectDirs;
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 
-pub use crate::responder::ResponderKind;
+pub use crate::responder::{is_allowed_browser_url, BrowserProvider, ResponderKind};
 pub use crate::vad::VadEngineKind;
 
 const SERVICE: &str = "com.secfree.SpeakerAIConnector";
@@ -169,9 +169,21 @@ pub struct Settings {
     #[serde(default)]
     pub force_default_output: bool,
     /// Which responder handles input frames. `Gemini` ships a live model
-    /// reply; `Nope` swallows input frames and produces nothing. v0.2 N3.
+    /// reply; `Nope` swallows input frames and produces nothing;
+    /// `WebBrowser` opens a provider tab and lets the browser own the
+    /// session. v0.2 N3 / v0.8 N1.
     #[serde(default)]
     pub responder: ResponderKind,
+    /// Which provider the `WebBrowser` responder opens. Drives the
+    /// default-URL lookup; only meaningful when `responder == WebBrowser`.
+    /// v0.8 N1.
+    #[serde(default)]
+    pub browser_provider: BrowserProvider,
+    /// User-supplied URL for `browser_provider == Custom`. Empty by
+    /// default and only read in the `Custom` case — non-`Custom`
+    /// providers resolve their URL from the code table. v0.8 N1.
+    #[serde(default)]
+    pub browser_url: String,
     /// When `true` (the default), a Bluetooth connect for the configured
     /// target launches a session immediately — the screen-free flow this
     /// app exists for. When `false`, the user can connect the speaker
@@ -235,6 +247,8 @@ impl Default for Settings {
             silence_timeout_ms: default_silence_timeout_ms(),
             force_default_output: false,
             responder: ResponderKind::default(),
+            browser_provider: BrowserProvider::default(),
+            browser_url: String::new(),
             auto_session_on_bt_connect: default_auto_session_on_bt_connect(),
             main_language: default_main_language(),
             alternative_language: None,
@@ -250,6 +264,29 @@ impl Settings {
     pub fn current() -> Settings {
         let g = settings_slot().lock().unwrap();
         g.clone()
+    }
+
+    /// Resolve the effective browser URL for the `WebBrowser` responder.
+    /// Non-`Custom` providers resolve from the code table; `Custom` reads
+    /// `browser_url`. In both cases the `http`/`https` scheme guard is
+    /// applied — a `Custom` URL with any other scheme (or an empty one)
+    /// yields `None`, so the coordinator never emits an `open_browser`
+    /// event for it. v0.8 N1.
+    pub fn resolved_browser_url(&self) -> Option<String> {
+        match self.browser_provider {
+            BrowserProvider::Custom => {
+                let url = self.browser_url.trim();
+                if is_allowed_browser_url(url) {
+                    Some(url.to_string())
+                } else {
+                    None
+                }
+            }
+            other => other
+                .default_url()
+                .filter(|u| is_allowed_browser_url(u))
+                .map(|u| u.to_string()),
+        }
     }
 
     pub fn update<F: FnOnce(&mut Settings)>(f: F) -> Result<Settings, ConfigError> {
@@ -320,6 +357,8 @@ mod tests {
             silence_timeout_ms: 900,
             force_default_output: true,
             responder: ResponderKind::Nope,
+            browser_provider: BrowserProvider::Claude,
+            browser_url: "https://example.com/voice".into(),
             auto_session_on_bt_connect: false,
             main_language: "Mandarin Chinese".into(),
             alternative_language: Some("English".into()),
@@ -328,6 +367,76 @@ mod tests {
         let text = toml::to_string_pretty(&s).unwrap();
         let parsed: Settings = toml::from_str(&text).unwrap();
         assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn web_browser_responder_round_trips() {
+        // `responder = "WebBrowser"` serializes by the PascalCase variant
+        // name, same as Gemini/Nope, and the browser fields ride alongside
+        // as their own top-level keys.
+        let s = Settings {
+            responder: ResponderKind::WebBrowser,
+            browser_provider: BrowserProvider::Custom,
+            browser_url: "https://chatgpt.com/".into(),
+            ..Settings::default()
+        };
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(text.contains("responder = \"WebBrowser\""));
+        assert!(text.contains("browser_provider = \"Custom\""));
+        let parsed: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn browser_fields_default_for_older_configs() {
+        // Pre-v0.8 configs predate the browser keys — `#[serde(default)]`
+        // upgrades them to ChatGPT / empty URL without a migration.
+        let parsed: Settings = toml::from_str(
+            r#"
+target_address = "aa:bb:cc:dd:ee:ff"
+model = "models/gemini-test"
+responder = "Gemini"
+"#,
+        )
+        .unwrap();
+        assert_eq!(parsed.browser_provider, BrowserProvider::ChatGPT);
+        assert_eq!(parsed.browser_url, "");
+    }
+
+    #[test]
+    fn resolved_browser_url_uses_table_for_non_custom() {
+        let s = Settings {
+            browser_provider: BrowserProvider::Gemini,
+            // A stale Custom URL is ignored for non-Custom providers.
+            browser_url: "file:///etc/passwd".into(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            s.resolved_browser_url().as_deref(),
+            Some("https://gemini.google.com/")
+        );
+    }
+
+    #[test]
+    fn resolved_browser_url_validates_custom_scheme() {
+        let ok = Settings {
+            browser_provider: BrowserProvider::Custom,
+            browser_url: "https://example.com/voice".into(),
+            ..Settings::default()
+        };
+        assert_eq!(
+            ok.resolved_browser_url().as_deref(),
+            Some("https://example.com/voice")
+        );
+
+        for bad in ["file:///etc/passwd", "mailto:x@y.z", "", "myapp://go"] {
+            let s = Settings {
+                browser_provider: BrowserProvider::Custom,
+                browser_url: bad.into(),
+                ..Settings::default()
+            };
+            assert_eq!(s.resolved_browser_url(), None, "scheme {bad:?} must reject");
+        }
     }
 
     #[test]

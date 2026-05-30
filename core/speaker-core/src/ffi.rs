@@ -481,6 +481,13 @@ pub extern "C" fn speaker_core_manual_session_start(
             }
         }
         ResponderKind::Nope => ResponderInit::Nope,
+        ResponderKind::WebBrowser => {
+            // Browser mode does not run the audio path; manual
+            // browser-mode sessions are wired in v0.8 N2/N5. Reject here
+            // until then rather than start a no-op audio session.
+            eprintln!("speaker-core: WebBrowser responder not yet wired (v0.8 N2)");
+            return -1;
+        }
     };
     match audio::start_manual_session(responder, s) {
         Ok(()) => 0,

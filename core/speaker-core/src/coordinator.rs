@@ -679,6 +679,15 @@ impl Coordinator {
                 }
             }
             ResponderKind::Nope => ResponderInit::Nope,
+            ResponderKind::WebBrowser => {
+                // Browser mode skips the audio path entirely — the
+                // coordinator branches before this match in v0.8 N2. Until
+                // that lands, fail the launch rather than spin up an audio
+                // session with no remote responder.
+                eprintln!("speaker-core: WebBrowser responder not yet wired (v0.8 N2)");
+                self.fail_launch();
+                return;
+            }
         };
         let sensitivity =
             WebRtcSensitivity::from_level(settings.vad_sensitivity.as_level())

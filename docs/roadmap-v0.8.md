@@ -31,12 +31,19 @@ keeps `ResponderKind` usable as-is in config, session manifests, and across the
 integer-level FFI setter. See
 [design — components 1 + Settings model](design-browser-tab-voice-mode.md#settings-model).
 
-- [todo] Add the fieldless `WebBrowser` variant to `ResponderKind` ([responder.rs](../core/speaker-core/src/responder.rs)). It serializes by variant name (`"WebBrowser"`, PascalCase, matching the existing round-trip test at [config.rs:334](../core/speaker-core/src/config.rs)). Extend `ResponderKind::from_level` / `as_level` with level `2 => WebBrowser`.
-- [todo] Add a separate fieldless `BrowserProvider` enum (`ChatGPT | Gemini | Claude | Custom`) used by the UI picker and the core's default-URL lookup — **not** by any automation logic. Give it `from_level` / `as_level` (`0 ChatGPT | 1 Gemini | 2 Claude | 3 Custom`).
-- [todo] Add `browser_provider: BrowserProvider` (default `ChatGPT`) and `browser_url: String` (default empty) to `Settings` ([config.rs](../core/speaker-core/src/config.rs)). Each its own `#[serde(default)]` key — no migration, no custom deserializer. Older configs lack the keys and pick up the defaults, exactly like `vad_engine` / `force_default_output` / the language fields did.
-- [todo] Add the default-URL resolution table (see [design — Default URLs](design-browser-tab-voice-mode.md#default-urls-stage-a)): ChatGPT → `https://chatgpt.com/`, Gemini → `https://gemini.google.com/`, Claude → `https://claude.ai/`. For non-`Custom` providers the URL resolves from this code table at `Launching` time; `browser_url` is only read when `browser_provider == Custom`.
-- [todo] Constrain `Custom` URLs to `http`/`https` in the core before the URL ever reaches the shell (the shell re-checks as a belt-and-braces guard — see N4). Reject other schemes (`file://`, `mailto:`, arbitrary app URLs) per [design — risk #6](design-browser-tab-voice-mode.md#risks--open-questions).
-- [todo] Round-trip tests in `config::tests`: the new keys serialize/deserialize, `responder = "WebBrowser"` round-trips, and an older config missing `browser_provider` / `browser_url` still loads with the defaults. Mirror the `vad_engine` / `responder` test pattern from earlier milestones.
+- [done] Add the fieldless `WebBrowser` variant to `ResponderKind` ([responder.rs](../core/speaker-core/src/responder.rs)). It serializes by variant name (`"WebBrowser"`, PascalCase, matching the existing round-trip test at [config.rs:334](../core/speaker-core/src/config.rs)). Extend `ResponderKind::from_level` / `as_level` with level `2 => WebBrowser`.
+- [done] Add a separate fieldless `BrowserProvider` enum (`ChatGPT | Gemini | Claude | Custom`) used by the UI picker and the core's default-URL lookup — **not** by any automation logic. Give it `from_level` / `as_level` (`0 ChatGPT | 1 Gemini | 2 Claude | 3 Custom`).
+- [done] Add `browser_provider: BrowserProvider` (default `ChatGPT`) and `browser_url: String` (default empty) to `Settings` ([config.rs](../core/speaker-core/src/config.rs)). Each its own `#[serde(default)]` key — no migration, no custom deserializer. Older configs lack the keys and pick up the defaults, exactly like `vad_engine` / `force_default_output` / the language fields did.
+- [done] Add the default-URL resolution table (see [design — Default URLs](design-browser-tab-voice-mode.md#default-urls-stage-a)): ChatGPT → `https://chatgpt.com/`, Gemini → `https://gemini.google.com/`, Claude → `https://claude.ai/`. For non-`Custom` providers the URL resolves from this code table at `Launching` time; `browser_url` is only read when `browser_provider == Custom`. Exposed via `BrowserProvider::default_url` + `Settings::resolved_browser_url`.
+- [done] Constrain `Custom` URLs to `http`/`https` in the core before the URL ever reaches the shell (the shell re-checks as a belt-and-braces guard — see N4). Reject other schemes (`file://`, `mailto:`, arbitrary app URLs) per [design — risk #6](design-browser-tab-voice-mode.md#risks--open-questions). `responder::is_allowed_browser_url` is the guard, applied inside `resolved_browser_url`.
+- [done] Round-trip tests in `config::tests`: the new keys serialize/deserialize, `responder = "WebBrowser"` round-trips, and an older config missing `browser_provider` / `browser_url` still loads with the defaults. Mirror the `vad_engine` / `responder` test pattern from earlier milestones.
+
+> **N2 hand-off note.** Adding the `WebBrowser` variant left two
+> `ResponderKind` matches non-exhaustive ([coordinator.rs:655](../core/speaker-core/src/coordinator.rs)
+> and [ffi.rs:458](../core/speaker-core/src/ffi.rs)). N1 added explicit
+> placeholder arms that log and fail the launch (`"not yet wired (v0.8 N2)"`).
+> N2 replaces the coordinator arm with the real pre-`ResponderInit` branch;
+> N2/N5 handle the manual-session ffi path.
 
 ## N2 — Coordinator branch for `WebBrowser` on `Launching`
 

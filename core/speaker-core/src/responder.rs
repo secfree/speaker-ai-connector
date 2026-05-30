@@ -37,15 +37,23 @@ pub enum ResponderKind {
     /// No remote responder — captures input, produces nothing. Useful
     /// for testing voice input without spending API credits.
     Nope,
+    /// Open the configured provider's URL in the default browser and let
+    /// the browser own the voice session — no audio crosses the core.
+    /// Fieldless on purpose: the provider/URL live in `Settings`
+    /// (`browser_provider` / `browser_url`), so this variant stays usable
+    /// as-is in config, session manifests, and the integer-level FFI
+    /// setter. v0.8 N1.
+    WebBrowser,
 }
 
 impl ResponderKind {
-    /// Stable `0..=1` level for the FFI setter so the shell doesn't have
+    /// Stable `0..=2` level for the FFI setter so the shell doesn't have
     /// to send a string across the boundary.
     pub fn from_level(level: u8) -> Option<Self> {
         match level {
             0 => Some(ResponderKind::Gemini),
             1 => Some(ResponderKind::Nope),
+            2 => Some(ResponderKind::WebBrowser),
             _ => None,
         }
     }
@@ -54,8 +62,69 @@ impl ResponderKind {
         match self {
             ResponderKind::Gemini => 0,
             ResponderKind::Nope => 1,
+            ResponderKind::WebBrowser => 2,
         }
     }
+}
+
+/// Which browser provider the `WebBrowser` responder targets. Used by the
+/// UI picker and the core's default-URL lookup — **not** by any
+/// automation logic (Stage A opens a tab and stops). Fieldless and
+/// serialized by variant name, mirroring `ResponderKind`. v0.8 N1.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum BrowserProvider {
+    #[default]
+    ChatGPT,
+    Gemini,
+    Claude,
+    /// User-supplied URL (read from `Settings::browser_url`). Used for
+    /// PWA-installed URLs or provider-specific deep links.
+    Custom,
+}
+
+impl BrowserProvider {
+    /// Stable `0..=3` level for the FFI setter.
+    pub fn from_level(level: u8) -> Option<Self> {
+        match level {
+            0 => Some(BrowserProvider::ChatGPT),
+            1 => Some(BrowserProvider::Gemini),
+            2 => Some(BrowserProvider::Claude),
+            3 => Some(BrowserProvider::Custom),
+            _ => None,
+        }
+    }
+
+    pub fn as_level(self) -> u8 {
+        match self {
+            BrowserProvider::ChatGPT => 0,
+            BrowserProvider::Gemini => 1,
+            BrowserProvider::Claude => 2,
+            BrowserProvider::Custom => 3,
+        }
+    }
+
+    /// Default-URL resolution table (v0.8 N1 / design §Default URLs). The
+    /// URL ships in code and is resolved at `Launching` time, so a
+    /// provider URL fix ships with a release rather than requiring users
+    /// to re-pick. Returns `None` for `Custom` — that case reads
+    /// `Settings::browser_url` instead.
+    pub fn default_url(self) -> Option<&'static str> {
+        match self {
+            BrowserProvider::ChatGPT => Some("https://chatgpt.com/"),
+            BrowserProvider::Gemini => Some("https://gemini.google.com/"),
+            BrowserProvider::Claude => Some("https://claude.ai/"),
+            BrowserProvider::Custom => None,
+        }
+    }
+}
+
+/// Guard for `Custom` browser URLs: only `http`/`https` schemes are
+/// allowed before a URL ever reaches the shell (the shell re-checks as a
+/// belt-and-braces guard — N4/N5). Rejects `file://`, `mailto:`, and
+/// arbitrary app URLs per design risk #6. v0.8 N1.
+pub fn is_allowed_browser_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 /// Per-session start parameters. The audio layer constructs one of these
@@ -166,10 +235,49 @@ mod tests {
 
     #[test]
     fn responder_kind_level_round_trip() {
-        for l in 0u8..=1 {
+        for l in 0u8..=2 {
             assert_eq!(ResponderKind::from_level(l).unwrap().as_level(), l);
         }
-        assert!(ResponderKind::from_level(2).is_none());
+        assert!(ResponderKind::from_level(3).is_none());
+    }
+
+    #[test]
+    fn responder_kind_web_browser_level() {
+        assert_eq!(ResponderKind::from_level(2), Some(ResponderKind::WebBrowser));
+        assert_eq!(ResponderKind::WebBrowser.as_level(), 2);
+    }
+
+    #[test]
+    fn browser_provider_level_round_trip() {
+        for l in 0u8..=3 {
+            assert_eq!(BrowserProvider::from_level(l).unwrap().as_level(), l);
+        }
+        assert!(BrowserProvider::from_level(4).is_none());
+    }
+
+    #[test]
+    fn browser_provider_default_urls() {
+        assert_eq!(BrowserProvider::ChatGPT.default_url(), Some("https://chatgpt.com/"));
+        assert_eq!(BrowserProvider::Gemini.default_url(), Some("https://gemini.google.com/"));
+        assert_eq!(BrowserProvider::Claude.default_url(), Some("https://claude.ai/"));
+        assert_eq!(BrowserProvider::Custom.default_url(), None);
+    }
+
+    #[test]
+    fn browser_provider_defaults_to_chatgpt() {
+        assert_eq!(BrowserProvider::default(), BrowserProvider::ChatGPT);
+    }
+
+    #[test]
+    fn custom_url_scheme_guard() {
+        assert!(is_allowed_browser_url("https://example.com/"));
+        assert!(is_allowed_browser_url("http://example.com/"));
+        assert!(is_allowed_browser_url("HTTPS://Example.com/"));
+        assert!(is_allowed_browser_url("  https://example.com/  "));
+        assert!(!is_allowed_browser_url("file:///etc/passwd"));
+        assert!(!is_allowed_browser_url("mailto:foo@bar.com"));
+        assert!(!is_allowed_browser_url("myapp://open"));
+        assert!(!is_allowed_browser_url(""));
     }
 
     #[test]
