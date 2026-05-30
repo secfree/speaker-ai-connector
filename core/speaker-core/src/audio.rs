@@ -860,7 +860,7 @@ pub fn start_session(
     // can't open, we want the failure before any network spend.
     let recorder = SessionRecorder::instance();
     let session_id = recorder
-        .start_session(trigger, target_address.clone(), INPUT_SAMPLE_RATE, responder_kind)
+        .start_session(trigger, target_address.clone(), INPUT_SAMPLE_RATE, responder_kind, None)
         .map_err(|e| {
             eprintln!("speaker-core: session recorder start failed: {e:?}");
             AudioError::StreamStartFailed(format!("recorder: {e:?}"))

@@ -827,6 +827,7 @@ impl Coordinator {
             target_address.clone(),
             crate::gemini::INPUT_SAMPLE_RATE,
             ResponderKind::WebBrowser,
+            Some(settings.browser_provider),
         ) {
             eprintln!("speaker-core: WebBrowser recorder start failed: {e:?}");
             last_error::set_other(&format!("session recorder: {e:?}"));

@@ -17,6 +17,10 @@ struct SessionInfo: Identifiable, Hashable, Decodable {
     /// Responder that handled the session — `nil` on legacy manifests
     /// written before the field landed.
     let responder: String?
+    /// Browser provider for `WebBrowser`-responder sessions (v0.8 N6).
+    /// `nil` for non-browser sessions and legacy manifests. Drives the
+    /// "Browser" badge and the no-recordings detail copy.
+    let browserProvider: String?
 
     enum CodingKeys: String, CodingKey {
         case id
@@ -28,6 +32,13 @@ struct SessionInfo: Identifiable, Hashable, Decodable {
         case clipCount = "clip_count"
         case clipDurationSecs = "clip_duration_secs"
         case responder
+        case browserProvider = "browser_provider"
+    }
+
+    /// True when this session ran in browser mode — the audio never
+    /// passed through the core, so there are no clips to play back.
+    var isBrowserSession: Bool {
+        responder == ResponderKind.webBrowser.tomlVariant
     }
 }
 

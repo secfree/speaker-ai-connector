@@ -210,6 +210,17 @@ enum BrowserProvider: UInt8, CaseIterable, Identifiable, Codable {
         default: return nil
         }
     }
+
+    /// PascalCase variant name as the core serializes it in TOML / the
+    /// session manifest — mirrors `BrowserProvider`'s serde form.
+    var tomlVariant: String {
+        switch self {
+        case .chatGPT: return "ChatGPT"
+        case .gemini: return "Gemini"
+        case .claude: return "Claude"
+        case .custom: return "Custom"
+        }
+    }
 }
 
 /// Decoded shape of the JSON returned by `speaker_core_settings_get`.

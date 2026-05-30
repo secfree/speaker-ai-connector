@@ -151,7 +151,11 @@ struct SessionsView: View {
         if let selected = selectedSession {
             SessionDetail(
                 session: selected,
-                live: selectedIsLive ? LiveContext(
+                // Browser-mode sessions have no audio pipeline and no live
+                // transcript — never build a LiveContext for them, so the
+                // detail falls through to the static "no recordings" copy
+                // instead of the Listening/Responding status bar. (v0.8 N6)
+                live: (selectedIsLive && !selected.isBrowserSession) ? LiveContext(
                     gateOpen: coordinator.gateOpen,
                     responding: coordinator.responding,
                     rows: liveRows,
@@ -216,7 +220,10 @@ struct SessionsView: View {
                 endUnixSecs: nil,
                 clipCount: 0,
                 clipDurationSecs: 0,
-                responder: coordinator.responder.tomlVariant
+                responder: coordinator.responder.tomlVariant,
+                browserProvider: coordinator.responder == .webBrowser
+                    ? coordinator.browserProvider.tomlVariant
+                    : nil
             )
             listed.insert(stub, at: 0)
         }
@@ -438,6 +445,9 @@ private struct SessionRow: View {
             HStack(spacing: 6) {
                 Text(formatSessionRowTitle(session.startUnixSecs))
                     .font(.system(.body, design: .default))
+                if session.isBrowserSession {
+                    BrowserBadge()
+                }
                 if isLive {
                     LiveBadge()
                 }
@@ -445,10 +455,16 @@ private struct SessionRow: View {
             HStack(spacing: 6) {
                 Image(systemName: session.trigger == "manual" ? "hand.tap" : "speaker.wave.2")
                     .help(session.trigger.capitalized)
-                Text("\(session.clipCount) clip\(session.clipCount == 1 ? "" : "s")")
-                if session.clipDurationSecs > 0 {
-                    Text("·")
-                    Text(formatDuration(session.clipDurationSecs))
+                // Browser sessions never record clips — the audio doesn't
+                // pass through the core, so there's nothing to count.
+                if session.isBrowserSession {
+                    Text("Browser session — no recordings")
+                } else {
+                    Text("\(session.clipCount) clip\(session.clipCount == 1 ? "" : "s")")
+                    if session.clipDurationSecs > 0 {
+                        Text("·")
+                        Text(formatDuration(session.clipDurationSecs))
+                    }
                 }
             }
             .font(.caption)
@@ -456,6 +472,26 @@ private struct SessionRow: View {
             .lineLimit(1)
         }
         .padding(.vertical, 2)
+    }
+}
+
+/// Small pill marking a browser-mode session in the sidebar / detail
+/// header. Mirrors `LiveBadge`'s shape so the two read as a set. v0.8 N6.
+private struct BrowserBadge: View {
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "safari")
+                .font(.caption2)
+            Text("Browser")
+                .font(.caption2.weight(.semibold))
+        }
+        .foregroundStyle(.purple)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 1)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.purple.opacity(0.12))
+        )
     }
 }
 
@@ -541,6 +577,8 @@ private struct SessionDetail: View {
                     }
                     .listStyle(.inset)
                 }
+            } else if session.isBrowserSession {
+                BrowserSessionDetail()
             } else if staticClips.isEmpty {
                 Text("No clips recorded in this session.")
                     .foregroundStyle(.secondary)
@@ -563,6 +601,9 @@ private struct SessionDetail: View {
             HStack(spacing: 8) {
                 Text(formatStart(session.startUnixSecs))
                     .font(.headline)
+                if session.isBrowserSession {
+                    BrowserBadge()
+                }
                 if live != nil {
                     LiveBadge()
                 }
@@ -570,6 +611,9 @@ private struct SessionDetail: View {
             HStack(spacing: 6) {
                 Label(session.trigger.capitalized, systemImage: session.trigger == "manual" ? "hand.tap" : "speaker.wave.2")
                 Text("· \(formatResponder(session.responder))")
+                if let provider = session.browserProvider {
+                    Text("· \(formatBrowserProvider(provider))")
+                }
                 if let addr = session.targetAddress {
                     Text("· \(addr)")
                 }
@@ -589,6 +633,29 @@ private struct SessionDetail: View {
     /// across the two render paths.
     private func fileName(of path: String) -> String {
         (path as NSString).lastPathComponent
+    }
+}
+
+/// Detail body for a browser-mode session. There are no clips to play —
+/// the audio never crossed the core — so this is purely explanatory.
+/// v0.8 N6.
+private struct BrowserSessionDetail: View {
+    var body: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "safari")
+                .font(.system(size: 36))
+                .foregroundStyle(.secondary)
+            Text("Browser session — no recordings")
+                .font(.headline)
+                .foregroundStyle(.secondary)
+            Text("In Browser mode the voice session runs in your default browser, so no audio passes through Speaker AI Connector.")
+                .font(.caption)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: 360)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -834,6 +901,12 @@ private func formatResponder(_ raw: String?) -> String {
         return kind.label
     }
     return raw
+}
+
+/// Display label for the manifest's browser provider (browser sessions
+/// only). Falls back to the raw PascalCase string for any unknown value.
+private func formatBrowserProvider(_ raw: String) -> String {
+    BrowserProvider(tomlVariant: raw)?.label ?? raw
 }
 
 private func formatMs(_ ms: UInt64) -> String {

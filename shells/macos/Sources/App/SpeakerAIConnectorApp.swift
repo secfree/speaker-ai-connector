@@ -96,12 +96,19 @@ private struct MenuBarLabel: View {
         Image(systemName: iconName)
             .onAppear {
                 btInFlight = coordinator.status.bluetoothSessionInFlight
-                if btInFlight { presentSessions() }
+                if btInFlight && !isBrowserMode { presentSessions() }
             }
             .onChange(of: coordinator.status.bluetoothSessionInFlight) { oldValue, newValue in
                 btInFlight = newValue
-                if newValue && !oldValue { presentSessions() }
+                if newValue && !oldValue && !isBrowserMode { presentSessions() }
             }
+    }
+
+    /// v0.8 N6: in Browser mode the live session has no transcript to
+    /// render, so the Sessions window (which absorbed the old Dialogue
+    /// window) must not auto-open — the speaker is screen-free by design.
+    private var isBrowserMode: Bool {
+        coordinator.responder == .webBrowser
     }
 
     private func presentSessions() {
@@ -123,9 +130,10 @@ struct MenuContent: View {
         Button(startStopLabel) {
             // Auto-open the Sessions window when *starting* a manual
             // session so the user sees the live status + clip stream.
-            // The BT path opens it from `MenuBarLabel` instead.
+            // The BT path opens it from `MenuBarLabel` instead. Browser
+            // mode has no live transcript, so skip the auto-open (v0.8 N6).
             let isStarting = !coordinator.status.manualSessionInFlight
-            if isStarting {
+            if isStarting && coordinator.responder != .webBrowser {
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "sessions")
             }
