@@ -35,6 +35,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # Full history + tags so the release step can diff against the
+          # previous tag to build the changelog.
+          fetch-depth: 0
+          fetch-tags: true
 
       # XcodeGen emits projects in objectVersion 77 (Xcode 16 format), which
       # the macos-14 runner's default Xcode 15.4 can't open. Pin to an Xcode
@@ -120,6 +125,20 @@ jobs:
 
           SHA256_LINE=$(cat "SpeakerAIConnector-${TAG}.zip.sha256")
 
+          # Build a changelog from one-line commit messages since the
+          # previous tag. Falls back to the whole history for the first
+          # release (no prior tag to diff against). `git` works here even
+          # though the working-directory is a build subdir — it walks up to
+          # the repo root to find .git.
+          PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${TAG}"
+          else
+            RANGE="${TAG}"
+          fi
+          CHANGELOG=$(git log --no-merges --pretty=format:'- %s' "$RANGE" || true)
+          [ -n "$CHANGELOG" ] || CHANGELOG="- (no changelog available)"
+
           # Write notes to a file so the heredoc body doesn't need to be
           # quote-safe for bash's $(...) parser (an apostrophe in the body
           # was previously breaking parsing).
@@ -135,6 +154,10 @@ jobs:
 
           Then open the app from /Applications. See the README for the full
           install + first-run walkthrough and why this app is not signed.
+
+          ## Changes
+
+          ${CHANGELOG}
 
           SHA-256 of the zip:
           \`\`\`
