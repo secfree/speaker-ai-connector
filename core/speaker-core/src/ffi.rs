@@ -16,7 +16,7 @@ use crate::config::{self, Settings, VadSensitivity};
 use crate::coordinator::{BTEvent, Coordinator, SessionCommand};
 use crate::gemini::DEFAULT_MODEL;
 use crate::last_error;
-use crate::responder::{ResponderInit, ResponderKind};
+use crate::responder::{is_allowed_browser_url, BrowserProvider, ResponderInit, ResponderKind};
 #[cfg(target_os = "macos")]
 use crate::routing;
 use crate::sessions::{SessionRecorder, SessionTrigger};
@@ -815,9 +815,9 @@ pub extern "C" fn speaker_core_settings_set_silence_timeout_ms(ms: u32) -> i32 {
     }
 }
 
-/// `level` is 0 (Gemini) or 1 (Nope). Persisted to TOML. Returns 0 on
-/// success, `-101` for an out-of-range level, otherwise a negative
-/// `ConfigError::code()`. v0.2 N3.
+/// `level` is 0 (Gemini), 1 (Nope), or 2 (WebBrowser, v0.8 N4). Persisted
+/// to TOML. Returns 0 on success, `-101` for an out-of-range level,
+/// otherwise a negative `ConfigError::code()`. v0.2 N3.
 #[no_mangle]
 pub extern "C" fn speaker_core_settings_set_responder(level: u8) -> i32 {
     let r = match ResponderKind::from_level(level) {
@@ -825,6 +825,58 @@ pub extern "C" fn speaker_core_settings_set_responder(level: u8) -> i32 {
         None => return -101,
     };
     match Settings::update(|s| s.responder = r) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Select the browser provider for the `WebBrowser` responder. `level` is
+/// `0 ChatGPT | 1 Gemini | 2 Claude | 3 Custom` (matches
+/// `BrowserProvider::from_level`). The non-`Custom` providers resolve
+/// their URL from the in-code table at `Launching` time; `Custom` reads
+/// the separately-set `browser_url`. Persisted to TOML. Returns 0 on
+/// success, `-101` for an out-of-range level, otherwise a negative
+/// `ConfigError::code()`. v0.8 N4.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_browser_provider(level: u8) -> i32 {
+    let p = match BrowserProvider::from_level(level) {
+        Some(p) => p,
+        None => return -101,
+    };
+    match Settings::update(|s| s.browser_provider = p) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
+/// Set the free-text `Custom` browser URL. The one genuinely free-text
+/// browser field, so the one place a `*const c_char` setter is warranted.
+/// Only honored when `browser_provider == Custom`; for the other providers
+/// the URL resolves from the in-code table. The `http`/`https` scheme
+/// check from N1 is re-applied here so a bad scheme is rejected at the
+/// boundary rather than persisted. Returns 0 on success, `-100` if the
+/// pointer is null / non-UTF-8 or the scheme is not `http`/`https`,
+/// otherwise a negative `ConfigError::code()`. v0.8 N4.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_browser_url(url: *const c_char) -> i32 {
+    if url.is_null() {
+        return -100;
+    }
+    let value = match unsafe { CStr::from_ptr(url) }.to_str() {
+        Ok(s) => s.to_string(),
+        Err(_) => return -100,
+    };
+    if !is_allowed_browser_url(&value) {
+        eprintln!("speaker-core: set_browser_url rejected non-http(s) scheme");
+        return -100;
+    }
+    match Settings::update(|s| s.browser_url = value) {
         Ok(_) => {
             Coordinator::instance().refresh_settings();
             0

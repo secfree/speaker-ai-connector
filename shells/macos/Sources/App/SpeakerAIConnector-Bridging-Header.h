@@ -200,8 +200,16 @@ int speaker_core_settings_set_model(const char *model);
 int speaker_core_settings_set_vad_sensitivity(unsigned char level);
 int speaker_core_settings_set_silence_timeout_ms(unsigned int ms);
 int speaker_core_settings_set_force_default_output(int enabled);
-// Responder level: 0 = Gemini (default), 1 = Nope.
+// Responder level: 0 = Gemini (default), 1 = Nope, 2 = WebBrowser (v0.8).
 int speaker_core_settings_set_responder(unsigned char level);
+// v0.8 N4: browser provider for the WebBrowser responder — 0 = ChatGPT
+// (default), 1 = Gemini, 2 = Claude, 3 = Custom. Non-Custom providers
+// resolve their URL from an in-code table; Custom reads browser_url.
+int speaker_core_settings_set_browser_provider(unsigned char level);
+// v0.8 N4: free-text Custom browser URL. Only honored when
+// browser_provider == Custom. Re-applies the http/https scheme guard —
+// returns -100 for null/non-UTF-8 or a non-http(s) scheme.
+int speaker_core_settings_set_browser_url(const char *url);
 // v0.3 N1: VAD engine level — 0 = WebRTC (default), 1 = Silero.
 int speaker_core_settings_set_vad_engine(unsigned char level);
 // v0.3 N1: unified per-engine tuning setter — semantics depend on the

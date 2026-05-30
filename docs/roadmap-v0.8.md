@@ -84,10 +84,10 @@ new fields. Follow the M6 / earlier integer-level convention "so the shell
 doesn't have to send a string across the boundary." See
 [design — FFI changes](design-browser-tab-voice-mode.md#ffi-changes).
 
-- [todo] `speaker_core_settings_set_responder(level: u8)` — **existing setter, add level `2 => WebBrowser`.** No rename, no new function.
-- [todo] `speaker_core_settings_set_browser_provider(level: u8)` — integer level (`0 ChatGPT | 1 Gemini | 2 Claude | 3 Custom`) with matching `BrowserProvider::from_level` / `as_level`.
-- [todo] `speaker_core_settings_set_browser_url(url: *const c_char)` — the one genuinely free-text field, so the one place a `*const c_char` setter is warranted. Only honored when `browser_provider == Custom`. Re-apply the `http`/`https` scheme check from N1.
-- [todo] Expose `browser_provider` / `browser_url` via the existing `speaker_core_settings_get` JSON. The `open_browser` event piggy-backs on the existing JSON status snapshot — no new FFI for the event itself.
+- [done] `speaker_core_settings_set_responder(level: u8)` — **existing setter, add level `2 => WebBrowser`.** No rename, no new function. `ResponderKind::from_level` already accepts `2` (N1); doc comment + bridging header updated to list the WebBrowser level.
+- [done] `speaker_core_settings_set_browser_provider(level: u8)` — integer level (`0 ChatGPT | 1 Gemini | 2 Claude | 3 Custom`) with matching `BrowserProvider::from_level` / `as_level`. Out-of-range rejected with `-101`. ([ffi.rs](../core/speaker-core/src/ffi.rs))
+- [done] `speaker_core_settings_set_browser_url(url: *const c_char)` — the one genuinely free-text field, so the one place a `*const c_char` setter is warranted. Only honored when `browser_provider == Custom`. Re-applies the `http`/`https` scheme check from N1 (`is_allowed_browser_url`) before persisting; rejects null/non-UTF-8/bad-scheme with `-100`. ([ffi.rs](../core/speaker-core/src/ffi.rs))
+- [done] Expose `browser_provider` / `browser_url` via the existing `speaker_core_settings_get` JSON — both are `Settings` fields and already serialize through the unchanged `speaker_core_settings_get`. The `open_browser` event piggy-backs on the existing JSON status snapshot — no new FFI for the event itself.
 
 ## N5 — macOS shell: snapshot consumer + Settings UI
 
