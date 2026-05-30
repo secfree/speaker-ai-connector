@@ -323,6 +323,13 @@ impl SessionRecorder {
         self.state.lock().unwrap().is_some()
     }
 
+    /// Id of the in-flight session, or `None` if no session is active.
+    /// Used by the coordinator's browser-mode tests to clean up the
+    /// session directory they create through the process-wide singleton.
+    pub fn active_session_id(&self) -> Option<String> {
+        self.state.lock().unwrap().as_ref().map(|s| s.id.clone())
+    }
+
     pub fn start_session(
         &self,
         trigger: SessionTrigger,

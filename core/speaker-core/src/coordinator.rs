@@ -38,7 +38,7 @@ use crate::last_error;
 use crate::responder::{ResponderInit, ResponderKind};
 #[cfg(target_os = "macos")]
 use crate::routing;
-use crate::sessions::{ClipEvent, SessionTrigger};
+use crate::sessions::{ClipEvent, SessionRecorder, SessionTrigger};
 use crate::vad::WebRtcSensitivity;
 
 /// Default debounce window for repeated BT connect events. Long enough
@@ -134,6 +134,36 @@ struct Inner {
     /// Derived state: Gemini currently emitting an output clip. The
     /// shell renders "responding…" off this.
     responding: bool,
+    /// One-shot browser-open request for the `WebBrowser` responder. Set
+    /// when a browser session reaches `SessionActive`; cleared when the
+    /// session tears down to `Idle`. The seq makes it idempotent, so the
+    /// clear is cosmetic (it just stops a stale URL lingering). v0.8 N2.
+    open_browser: Option<OpenBrowserEvent>,
+    /// Monotonic counter behind `OpenBrowserEvent::seq`. Never reset, so
+    /// each browser session's event outranks the previous one. v0.8 N2.
+    open_browser_seq: u64,
+}
+
+/// One-shot request for the shell to open a browser tab — the
+/// `ResponderKind::WebBrowser` path (v0.8 N2/N3). Carried on the status
+/// snapshot rather than in the accumulating `clip_events` list: re-reading
+/// a clip event is idempotent, but re-reading this would open a *second*
+/// tab. The shell opens exactly one tab per session by tracking the
+/// highest `seq` it has acted on and ignoring any entry at or below it —
+/// so the open survives a poll racing the core, and survives the core
+/// clearing the entry on a later snapshot.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct OpenBrowserEvent {
+    /// Constant discriminator (`"open_browser"`) so the shell pattern-
+    /// matches this entry the same way it matches `StatusEvent::variant`.
+    pub kind: &'static str,
+    /// Monotonic id, never reset across sessions, so a new session's
+    /// event always outranks the last one the shell acted on.
+    pub seq: u64,
+    /// Resolved target URL — the code-table lookup for non-`Custom`
+    /// providers, or `Settings::browser_url` for `Custom`. Already
+    /// scheme-checked (`http`/`https`) by `Settings::resolved_browser_url`.
+    pub url: String,
 }
 
 /// One log entry in the per-session activity buffer. `event_seq` is the
@@ -170,6 +200,11 @@ pub struct StatusSnapshot {
     pub daily_input_clip_cap: u32,
     /// True when the cap is reached. `false` when `cap == 0` (unlimited).
     pub daily_input_clip_cap_reached: bool,
+    /// One-shot browser-open request for the `WebBrowser` responder, or
+    /// `None` for every other responder. The shell opens the URL exactly
+    /// once by tracking the highest `seq` it has acted on. v0.8 N2/N3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_browser: Option<OpenBrowserEvent>,
 }
 
 impl Inner {
@@ -246,6 +281,8 @@ impl Coordinator {
                     clip_event_seq: 0,
                     gate_open: false,
                     responding: false,
+                    open_browser: None,
+                    open_browser_seq: 0,
                 }),
                 generation: AtomicU64::new(0),
             };
@@ -288,6 +325,7 @@ impl Coordinator {
             daily_input_clip_count: today.count,
             daily_input_clip_cap: cap,
             daily_input_clip_cap_reached: reached,
+            open_browser: inner.open_browser.clone(),
         }
     }
 
@@ -609,6 +647,7 @@ impl Coordinator {
             return;
         }
         inner.state = SessionState::Idle;
+        inner.open_browser = None;
         inner.revision += 1;
         self.generation.fetch_add(1, Ordering::SeqCst);
     }
@@ -637,6 +676,14 @@ impl Coordinator {
 
     fn do_launch(&self, kind: SessionKind, target_address: Option<String>, name: String) {
         let settings = self.settings();
+        // v0.8 N2: the WebBrowser responder never touches the audio path —
+        // it opens a provider tab and lets the browser own the mic + speaker
+        // via the OS default devices. Branch out before force-default-output,
+        // ResponderInit, and audio::start_session are even considered.
+        if settings.responder == ResponderKind::WebBrowser {
+            self.do_launch_web_browser(kind, target_address, name, &settings);
+            return;
+        }
         // Force-default-output is the only routing knob the user can
         // toggle. Only meaningful for the BT path — manual sessions
         // inherit whatever the user has selected as default.
@@ -679,14 +726,10 @@ impl Coordinator {
                 }
             }
             ResponderKind::Nope => ResponderInit::Nope,
+            // Browser mode never reaches the audio path: `do_launch`
+            // branches to `do_launch_web_browser` before this match (v0.8 N2).
             ResponderKind::WebBrowser => {
-                // Browser mode skips the audio path entirely — the
-                // coordinator branches before this match in v0.8 N2. Until
-                // that lands, fail the launch rather than spin up an audio
-                // session with no remote responder.
-                eprintln!("speaker-core: WebBrowser responder not yet wired (v0.8 N2)");
-                self.fail_launch();
-                return;
+                unreachable!("WebBrowser is handled by do_launch_web_browser")
             }
         };
         let sensitivity =
@@ -724,6 +767,88 @@ impl Coordinator {
         }
     }
 
+    /// `Launching` side-effect path for `ResponderKind::WebBrowser`
+    /// (v0.8 N2). No capture, no playback, no Gemini, no VAD — the browser
+    /// tab owns the mic + speaker through the OS default devices. We only:
+    /// (1) make sure routing is right *before* the tab opens, (2) write a
+    /// manifest so the session shows up in the Sessions list (the audio
+    /// path normally does this), and (3) emit the one-shot `open_browser`
+    /// event and go `SessionActive`. Teardown is the shared path — a BT
+    /// disconnect or `Stop` reaches `spawn_teardown` like any other session.
+    fn do_launch_web_browser(
+        &self,
+        kind: SessionKind,
+        target_address: Option<String>,
+        name: String,
+        settings: &Settings,
+    ) {
+        // Risk #1 ordering: the browser captures the OS *default* devices,
+        // so routing must be correct before the tab opens — emit
+        // `open_browser` only after it is confirmed. For a BT session with
+        // force-default-output on, a routing failure is fatal here (the tab
+        // would otherwise capture the wrong output and fail silently),
+        // stronger than the Gemini path which merely logs. The
+        // force-default-*input* half of risk #1 is deferred to N6 after
+        // hardware testing; if the browser captures the built-in mic there,
+        // this emit must also gate on an input-routing helper.
+        #[cfg(target_os = "macos")]
+        if kind == SessionKind::Bluetooth && settings.force_default_output {
+            if let Some(addr) = &target_address {
+                if let Err(e) = routing::force_default_output(addr) {
+                    eprintln!(
+                        "speaker-core: force-default-output failed (browser mode): {e:?}"
+                    );
+                    last_error::set_other(&format!("audio routing failed: {e:?}"));
+                    self.fail_launch();
+                    return;
+                }
+            }
+        }
+
+        // Resolve the URL: the code table for non-`Custom` providers, or
+        // `browser_url` for `Custom` — already `http`/`https` scheme-checked
+        // inside `resolved_browser_url`. An empty / invalid Custom URL yields
+        // `None`; refuse to launch rather than hand the shell a bad URL.
+        let url = match settings.resolved_browser_url() {
+            Some(u) => u,
+            None => {
+                eprintln!("speaker-core: WebBrowser launch: no valid http(s) URL configured");
+                last_error::set_other("Browser URL is empty or not http/https — open Settings");
+                self.fail_launch();
+                return;
+            }
+        };
+
+        // The audio path normally opens the recorder; in browser mode we do
+        // it ourselves so the session still gets a manifest (with zero clips).
+        let recorder = SessionRecorder::instance();
+        if let Err(e) = recorder.start_session(
+            kind.trigger(),
+            target_address.clone(),
+            crate::gemini::INPUT_SAMPLE_RATE,
+            ResponderKind::WebBrowser,
+        ) {
+            eprintln!("speaker-core: WebBrowser recorder start failed: {e:?}");
+            last_error::set_other(&format!("session recorder: {e:?}"));
+            self.fail_launch();
+            return;
+        }
+
+        // Routing confirmed + manifest open: emit the one-shot event and go
+        // Active. The monotonic seq makes the shell open exactly one tab even
+        // if a poll races this transition.
+        let mut inner = self.inner.lock().unwrap();
+        inner.open_browser_seq += 1;
+        let seq = inner.open_browser_seq;
+        inner.open_browser = Some(OpenBrowserEvent {
+            kind: "open_browser",
+            seq,
+            url,
+        });
+        inner.state = SessionState::Active { kind, name };
+        inner.revision += 1;
+    }
+
     fn fail_launch(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.state = SessionState::Idle;
@@ -738,6 +863,9 @@ impl Coordinator {
                 let coord = Coordinator::instance();
                 let mut inner = coord.inner.lock().unwrap();
                 inner.state = SessionState::Idle;
+                // Drop any browser-open request so a stale URL doesn't
+                // linger on the snapshot after the session ends (v0.8 N2).
+                inner.open_browser = None;
                 inner.revision += 1;
             })
             .ok();
@@ -789,10 +917,24 @@ mod tests {
         inner.state = SessionState::Idle;
         inner.last_connect_at = None;
         inner.target_name = None;
+        inner.open_browser = None;
         inner.settings.target_address = target.map(|s| s.to_string());
         // Restore the v0.4 N1 flag default so a test that flipped it off
         // doesn't bleed into the next one through the shared singleton.
         inner.settings.auto_session_on_bt_connect = true;
+        // Restore the responder + browser fields so a browser-mode test
+        // doesn't push the next test down the WebBrowser branch through the
+        // shared singleton (v0.8 N2).
+        inner.settings.responder = ResponderKind::Gemini;
+        inner.settings.browser_provider = crate::responder::BrowserProvider::ChatGPT;
+        inner.settings.browser_url = String::new();
+        drop(inner);
+        // The browser path opens the process-wide recorder singleton; make
+        // sure a previous test didn't leave it active.
+        let rec = SessionRecorder::instance();
+        if rec.is_active() {
+            let _ = rec.end_session();
+        }
         guard
     }
 
@@ -1030,5 +1172,192 @@ mod tests {
         // Give the do_launch thread a moment to fail and reset to Idle
         // so we don't leak state to the next test.
         std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // --- v0.8 N2: WebBrowser responder branch ------------------------
+
+    use crate::responder::BrowserProvider;
+
+    /// Configure the cached settings for the browser path. Writes only the
+    /// in-memory `Inner::settings` (no disk write) so the test stays a
+    /// pure-state-machine exercise of `do_launch_web_browser`.
+    fn set_browser_settings(coord: &Coordinator, provider: BrowserProvider, url: &str) {
+        let mut inner = coord.inner.lock().unwrap();
+        inner.settings.responder = ResponderKind::WebBrowser;
+        inner.settings.browser_provider = provider;
+        inner.settings.browser_url = url.to_string();
+        // Browser mode never forces output in these unit tests — the
+        // routing helper would otherwise try to touch real CoreAudio.
+        inner.settings.force_default_output = false;
+    }
+
+    /// Tear the singleton (and the recorder) back to Idle after a browser
+    /// launch, deleting the on-disk session the launch created so the test
+    /// leaves no artifact under the real app-data dir.
+    fn teardown_browser_session(coord: &Coordinator) {
+        let rec = SessionRecorder::instance();
+        let id = rec.active_session_id();
+        crate::audio::stop_session(); // ends the recorder, fires SessionEnded
+        if let Some(id) = id {
+            let _ = rec.delete_session(&id);
+        }
+        let mut inner = coord.inner.lock().unwrap();
+        inner.state = SessionState::Idle;
+        inner.open_browser = None;
+    }
+
+    #[test]
+    fn web_browser_launch_goes_active_and_emits_open_browser() {
+        let _g = reset_singleton(None);
+        let coord = Coordinator::instance();
+        set_browser_settings(&coord, BrowserProvider::ChatGPT, "");
+
+        let rev_before = coord.revision();
+        // Synchronous browser launch — no audio path, no thread.
+        coord.do_launch(SessionKind::Manual, None, "manual".into());
+
+        let snap = coord.status_snapshot();
+        assert!(
+            matches!(snap.status, StatusEvent::ManualSessionActive),
+            "browser launch parks in SessionActive"
+        );
+        assert!(snap.revision > rev_before, "launch bumps the revision");
+        let ob = snap.open_browser.expect("open_browser emitted");
+        assert_eq!(ob.kind, "open_browser");
+        assert_eq!(ob.url, "https://chatgpt.com/", "ChatGPT resolves from the table");
+        assert!(ob.seq > 0, "seq is monotonic and starts above zero");
+        // The recorder opened a manifest for this session.
+        assert!(SessionRecorder::instance().is_active());
+
+        // One-shot: re-polling returns the *same* seq, so the shell dedupes
+        // rather than opening a second tab.
+        assert_eq!(coord.status_snapshot().open_browser.unwrap().seq, ob.seq);
+
+        teardown_browser_session(&coord);
+        // After teardown the event is cleared and we're Idle.
+        let snap = coord.status_snapshot();
+        assert!(snap.open_browser.is_none());
+        assert!(matches!(snap.status, StatusEvent::Idle | StatusEvent::NoDeviceSelected));
+    }
+
+    #[test]
+    fn web_browser_manifest_records_web_browser_responder() {
+        let _g = reset_singleton(None);
+        let coord = Coordinator::instance();
+        set_browser_settings(&coord, BrowserProvider::Gemini, "");
+        coord.do_launch(SessionKind::Manual, None, "manual".into());
+
+        let rec = SessionRecorder::instance();
+        let id = rec.active_session_id().expect("session active");
+        crate::audio::stop_session(); // flushes the manifest to disk
+        let sessions = rec.list_sessions().unwrap();
+        let mine = sessions
+            .iter()
+            .find(|s| s.id == id)
+            .expect("browser session listed");
+        assert_eq!(mine.responder, Some(ResponderKind::WebBrowser));
+        assert_eq!(mine.clip_count, 0, "browser sessions have no clips");
+        let _ = rec.delete_session(&id);
+        {
+            let mut inner = coord.inner.lock().unwrap();
+            inner.state = SessionState::Idle;
+            inner.open_browser = None;
+        }
+    }
+
+    #[test]
+    fn web_browser_seq_is_monotonic_across_sessions() {
+        let _g = reset_singleton(None);
+        let coord = Coordinator::instance();
+        set_browser_settings(&coord, BrowserProvider::ChatGPT, "");
+
+        coord.do_launch(SessionKind::Manual, None, "manual".into());
+        let first = coord.status_snapshot().open_browser.unwrap().seq;
+        teardown_browser_session(&coord);
+
+        // A second session must outrank the first so the shell acts on it
+        // even though it already acted on `first`.
+        set_browser_settings(&coord, BrowserProvider::ChatGPT, "");
+        coord.do_launch(SessionKind::Manual, None, "manual".into());
+        let second = coord.status_snapshot().open_browser.unwrap().seq;
+        assert!(second > first, "seq strictly increases across sessions");
+        teardown_browser_session(&coord);
+    }
+
+    #[test]
+    fn web_browser_custom_invalid_url_fails_launch() {
+        let _g = reset_singleton(None);
+        let coord = Coordinator::instance();
+        // A non-http(s) Custom URL resolves to None — refuse to launch,
+        // before the recorder or any audio path is touched.
+        set_browser_settings(&coord, BrowserProvider::Custom, "file:///etc/passwd");
+
+        coord.do_launch(SessionKind::Manual, None, "manual".into());
+
+        let snap = coord.status_snapshot();
+        assert!(snap.open_browser.is_none(), "no event for a rejected URL");
+        assert!(
+            matches!(snap.status, StatusEvent::Idle | StatusEvent::NoDeviceSelected),
+            "launch failed back to Idle"
+        );
+        assert!(
+            !SessionRecorder::instance().is_active(),
+            "no manifest opened for a rejected URL"
+        );
+    }
+
+    #[test]
+    fn web_browser_stop_command_tears_down_to_idle() {
+        let _g = reset_singleton(None);
+        let coord = Coordinator::instance();
+        set_browser_settings(&coord, BrowserProvider::ChatGPT, "");
+        coord.do_launch(SessionKind::Manual, None, "manual".into());
+        assert!(matches!(
+            coord.inner.lock().unwrap().state,
+            SessionState::Active { kind: SessionKind::Manual, .. }
+        ));
+
+        // Stop reaches the shared teardown path — same as any session.
+        let status = coord.handle_command(SessionCommand::Stop);
+        assert!(matches!(status, StatusEvent::TearingDown { .. }));
+        // The spawned teardown thread races us; settle it deterministically
+        // and clean up the on-disk session it (or we) opened.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let rec = SessionRecorder::instance();
+        if let Some(id) = rec.active_session_id() {
+            crate::audio::stop_session();
+            let _ = rec.delete_session(&id);
+        }
+        {
+            let mut inner = coord.inner.lock().unwrap();
+            inner.state = SessionState::Idle;
+            inner.open_browser = None;
+        }
+    }
+
+    #[test]
+    fn web_browser_bt_disconnect_tears_down_to_idle() {
+        let _g = reset_singleton(Some(TARGET));
+        let coord = Coordinator::instance();
+        set_browser_settings(&coord, BrowserProvider::ChatGPT, "");
+        // Pretend a BT-owned browser session is active.
+        {
+            let mut inner = coord.inner.lock().unwrap();
+            inner.state = SessionState::Active {
+                kind: SessionKind::Bluetooth,
+                name: TARGET_NAME.into(),
+            };
+        }
+        let status = coord.handle_bt(BTEvent::Disconnected {
+            address: TARGET.into(),
+            name: TARGET_NAME.into(),
+        });
+        assert!(matches!(status, StatusEvent::TearingDown { .. }));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        {
+            let mut inner = coord.inner.lock().unwrap();
+            inner.state = SessionState::Idle;
+            inner.open_browser = None;
+        }
     }
 }

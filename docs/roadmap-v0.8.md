@@ -52,17 +52,26 @@ the audio layer is touched. The state *names* don't change — the same
 `SessionActive` covers both "Gemini WebSocket open" and "browser tab open." See
 [design — component 2](design-browser-tab-voice-mode.md#components-touched).
 
-- [todo] In the coordinator ([coordinator.rs](../core/speaker-core/src/coordinator.rs), around the `ResponderInit` build at [coordinator.rs:655](../core/speaker-core/src/coordinator.rs)): when `Launching` with `ResponderKind::WebBrowser`, branch **before** building `ResponderInit` — skip `ResponderInit`, skip `audio::start_session` entirely (no capture, no playback, no `gemini::connect`, no VAD relay).
-- [todo] Have the coordinator call `recorder.start_session` itself for this mode (the audio path normally does this — see N5 for the manifest rewiring), so the manifest still gets written.
-- [todo] Emit the sequenced `open_browser` status event (see N3 for the snapshot shape) and transition to `SessionActive`. Stay there until `BTEvent::Disconnected` or `SessionCommand::Stop`, then tear down to `Idle`. No automation closes the browser tab — that's the user's business.
-- [todo] **Resolve risk #1 ordering:** only emit `open_browser` *after* audio routing is confirmed (output and input). This couples to N6 — see [design — risk #1](design-browser-tab-voice-mode.md#risks--open-questions). For Stage A, at minimum gate the emit behind the existing `force_default_output` path; if N6 shows the browser captures the built-in mic, a force-default-*input* helper becomes part of N6 and `open_browser` must wait on both.
-- [todo] Unit tests in `coordinator.rs`: the `Launching → SessionActive` branch for `WebBrowser` does not touch the audio path; `BTEvent::Disconnected` and `SessionCommand::Stop` both tear down to `Idle`; the manifest is created. Cover the one-shot `seq` semantics from N3.
+- [done] In the coordinator ([coordinator.rs](../core/speaker-core/src/coordinator.rs), around the `ResponderInit` build at [coordinator.rs:655](../core/speaker-core/src/coordinator.rs)): when `Launching` with `ResponderKind::WebBrowser`, branch **before** building `ResponderInit` — skip `ResponderInit`, skip `audio::start_session` entirely (no capture, no playback, no `gemini::connect`, no VAD relay).
+- [done] Have the coordinator call `recorder.start_session` itself for this mode (the audio path normally does this — see N5 for the manifest rewiring), so the manifest still gets written.
+- [done] Emit the sequenced `open_browser` status event (see N3 for the snapshot shape) and transition to `SessionActive`. Stay there until `BTEvent::Disconnected` or `SessionCommand::Stop`, then tear down to `Idle`. No automation closes the browser tab — that's the user's business.
+- [done] **Resolve risk #1 ordering:** only emit `open_browser` *after* audio routing is confirmed (output and input). This couples to N6 — see [design — risk #1](design-browser-tab-voice-mode.md#risks--open-questions). For Stage A, gate the emit behind the existing `force_default_output` path — a routing failure now fails the browser launch (stronger than the Gemini path, which only logs). The force-default-*input* half is deferred to N6 after hardware testing; if N6 shows the browser captures the built-in mic, `open_browser` must wait on both.
+- [done] Unit tests in `coordinator.rs`: the `Launching → SessionActive` branch for `WebBrowser` does not touch the audio path; `BTEvent::Disconnected` and `SessionCommand::Stop` both tear down to `Idle`; the manifest is created. Cover the one-shot `seq` semantics from N3.
 
 ## N3 — `open_browser` status event (one-shot via seq)
 
 Add a one-shot entry to the status snapshot's event list, carrying a monotonic
 sequence id so the shell opens exactly one tab per session. See
 [design — component 3](design-browser-tab-voice-mode.md#components-touched).
+
+> **N2 overlap.** N2 could not emit the event without the snapshot shape,
+> so the core side of N3 already landed with N2: `OpenBrowserEvent { kind,
+> seq, url }` on `StatusSnapshot.open_browser` (serialized
+> `{ "kind": "open_browser", "seq", "url" }`), the monotonic
+> `Inner::open_browser_seq`, and the one-shot/monotonicity coordinator
+> tests. What's left for N3 proper is exposing the field to the shell —
+> which is the JSON status snapshot that N4/N5 consume — plus any
+> additional dedicated tests; confirm and close.
 
 - [todo] Add the `open_browser` entry to the status snapshot JSON: `{ "kind": "open_browser", "seq": 7, "url": "https://chatgpt.com/" }`. The `url` is the resolved URL from N1 (table lookup for non-Custom, `browser_url` for Custom).
 - [todo] The revision counter alone is **not** enough to fire once — it only signals *that the snapshot changed*. Unlike per-clip events (an accumulating list the shell re-renders idempotently), re-reading `open_browser` would open a second tab. The core assigns a monotonic `seq`; the shell tracks the highest `seq` it has acted on (see N4). This makes the open exactly-once even if a poll races the core, and survives the core clearing the entry on a later snapshot.
