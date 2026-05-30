@@ -73,9 +73,9 @@ sequence id so the shell opens exactly one tab per session. See
 > which is the JSON status snapshot that N4/N5 consume — plus any
 > additional dedicated tests; confirm and close.
 
-- [todo] Add the `open_browser` entry to the status snapshot JSON: `{ "kind": "open_browser", "seq": 7, "url": "https://chatgpt.com/" }`. The `url` is the resolved URL from N1 (table lookup for non-Custom, `browser_url` for Custom).
-- [todo] The revision counter alone is **not** enough to fire once — it only signals *that the snapshot changed*. Unlike per-clip events (an accumulating list the shell re-renders idempotently), re-reading `open_browser` would open a second tab. The core assigns a monotonic `seq`; the shell tracks the highest `seq` it has acted on (see N4). This makes the open exactly-once even if a poll races the core, and survives the core clearing the entry on a later snapshot.
-- [todo] Tests for the seq monotonicity and one-shot semantics (some land in N2's coordinator tests).
+- [done] Add the `open_browser` entry to the status snapshot JSON: `{ "kind": "open_browser", "seq": 7, "url": "https://chatgpt.com/" }`. The `url` is the resolved URL from N1 (table lookup for non-Custom, `browser_url` for Custom). Landed with N2 as `StatusSnapshot.open_browser` (`#[serde(skip_serializing_if = "Option::is_none")]`); `speaker_core_coord_status` serializes the whole snapshot ([ffi.rs:556](../core/speaker-core/src/ffi.rs)), so the field already reaches the shell. The exact JSON shape is now locked by a dedicated `web_browser_snapshot_json_shape` test.
+- [done] The revision counter alone is **not** enough to fire once — it only signals *that the snapshot changed*. Unlike per-clip events (an accumulating list the shell re-renders idempotently), re-reading `open_browser` would open a second tab. The core assigns a monotonic `seq`; the shell tracks the highest `seq` it has acted on (see N4). This makes the open exactly-once even if a poll races the core, and survives the core clearing the entry on a later snapshot.
+- [done] Tests for the seq monotonicity and one-shot semantics (some land in N2's coordinator tests). Added `web_browser_snapshot_json_shape` for the serialized snapshot shape; seq monotonicity and one-shot are covered by N2's `web_browser_seq_is_monotonic_across_sessions` and `web_browser_launch_goes_active_and_emits_open_browser`.
 
 ## N4 — FFI surface for the new settings fields
 

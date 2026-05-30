@@ -1241,6 +1241,39 @@ mod tests {
     }
 
     #[test]
+    fn web_browser_snapshot_json_shape() {
+        // N3: the shell (N4/N5) consumes `open_browser` off the serialized
+        // status snapshot, so lock the JSON shape down to exactly
+        // `{ "kind": "open_browser", "seq": <n>, "url": <resolved> }`.
+        let _g = reset_singleton(None);
+        let coord = Coordinator::instance();
+        set_browser_settings(&coord, BrowserProvider::ChatGPT, "");
+        coord.do_launch(SessionKind::Manual, None, "manual".into());
+
+        let snap = coord.status_snapshot();
+        let seq = snap.open_browser.as_ref().expect("emitted").seq;
+        let json = serde_json::to_value(&snap).expect("snapshot serializes");
+        assert_eq!(
+            json["open_browser"],
+            serde_json::json!({
+                "kind": "open_browser",
+                "seq": seq,
+                "url": "https://chatgpt.com/",
+            }),
+            "open_browser serializes with exactly kind/seq/url"
+        );
+
+        teardown_browser_session(&coord);
+        // Once cleared, the field is omitted entirely (skip_serializing_if),
+        // so a stale poll can't re-open the tab from the JSON.
+        let json = serde_json::to_value(&coord.status_snapshot()).expect("serializes");
+        assert!(
+            json.get("open_browser").is_none(),
+            "open_browser is omitted from the JSON when None"
+        );
+    }
+
+    #[test]
     fn web_browser_manifest_records_web_browser_responder() {
         let _g = reset_singleton(None);
         let coord = Coordinator::instance();
