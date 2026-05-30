@@ -187,9 +187,7 @@ struct SettingsView: View {
             // The picker stays enabled mid-session: the responder is
             // captured at launch time (see Coordinator::do_launch), so
             // changing it here only affects the *next* session.
-            Text(coordinator.responder == .nope
-                 ? "Nope swallows input frames and never produces a reply. Sessions still record input clips so you can verify voice capture end to end without spending API credits."
-                 : "Gemini Live streams audio over WebSocket and plays the response back through the speaker.")
+            Text(responderHelpText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if coordinator.status.sessionInFlight {
@@ -197,6 +195,10 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+        }
+
+        if coordinator.responder == .webBrowser {
+            browserSection
         }
 
         // The API-key section is hidden entirely when Nope is selected
@@ -265,6 +267,67 @@ struct SettingsView: View {
                 .textFieldStyle(.roundedBorder)
                 .disabled(coordinator.status.sessionInFlight)
             Text("Live API model id, e.g. models/gemini-3.1-flash-live-preview. Persisted to config.toml.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var responderHelpText: String {
+        switch coordinator.responder {
+        case .gemini:
+            return "Gemini Live streams audio over WebSocket and plays the response back through the speaker."
+        case .nope:
+            return "Nope swallows input frames and never produces a reply. Sessions still record input clips so you can verify voice capture end to end without spending API credits."
+        case .webBrowser:
+            return "Browser opens the chosen provider in your default browser and lets the browser own the mic and speaker. Speaker AI Connector doesn't stream or record audio in this mode."
+        }
+    }
+
+    /// True when the Custom URL draft is a non-empty http/https URL. Mirrors
+    /// the core's `is_allowed_browser_url` guard (N1) so the UI flags a bad
+    /// scheme before it's ever sent across the FFI. v0.8 N5.
+    private var customURLValid: Bool {
+        let trimmed = coordinator.browserUrl.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased() else { return false }
+        return scheme == "http" || scheme == "https"
+    }
+
+    @ViewBuilder
+    private var browserSection: some View {
+        Section("Browser") {
+            Picker("Provider", selection: $coordinator.browserProvider) {
+                ForEach(BrowserProvider.allCases) { provider in
+                    Text(provider.label).tag(provider)
+                }
+            }
+            .pickerStyle(.menu)
+
+            if coordinator.browserProvider == .custom {
+                TextField("Custom URL", text: $coordinator.browserUrl,
+                          prompt: Text("https://example.com/"))
+                    .textFieldStyle(.roundedBorder)
+                if !coordinator.browserUrl.isEmpty && !customURLValid {
+                    Text("Enter an http or https URL.")
+                        .font(.caption)
+                        .foregroundStyle(Color.red)
+                }
+            } else {
+                // Read-only: the URL is resolved from a code table on the
+                // core side; showing it here just confirms where you'll land.
+                TextField("URL", text: .constant(coordinator.browserProvider.defaultURL ?? ""))
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(true)
+            }
+
+            Text("Sign in to the provider in your default browser once. We don't store the login — your browser does.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Microphone permission must be granted to your browser, not to Speaker AI Connector, for this mode.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("In Browser mode, recordings are not available — the audio doesn't pass through Speaker AI Connector.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import AVFoundation
+import AppKit
 import os
 
 private let log = Logger(subsystem: "com.secfree.SpeakerAIConnector", category: "core")
@@ -130,10 +131,13 @@ enum VadEngine: UInt8, CaseIterable, Identifiable, Codable {
 }
 
 /// Mirrors `speaker_core::responder::ResponderKind`. The TOML stores the
-/// variant name; the FFI setter takes a 0/1 level.
+/// variant name; the FFI setter takes the 0/1/2 level. v0.8 N5 adds
+/// `webBrowser` (level 2): the core opens the configured provider in the
+/// default browser and lets the browser own the mic + speaker.
 enum ResponderKind: UInt8, CaseIterable, Identifiable, Codable {
     case gemini = 0
     case nope = 1
+    case webBrowser = 2
 
     var id: UInt8 { rawValue }
 
@@ -141,6 +145,7 @@ enum ResponderKind: UInt8, CaseIterable, Identifiable, Codable {
         switch self {
         case .gemini: return "Gemini Live"
         case .nope: return "Nope (no responder)"
+        case .webBrowser: return "Browser"
         }
     }
 
@@ -148,6 +153,7 @@ enum ResponderKind: UInt8, CaseIterable, Identifiable, Codable {
         switch tomlVariant {
         case "Gemini": self = .gemini
         case "Nope": self = .nope
+        case "WebBrowser": self = .webBrowser
         default: return nil
         }
     }
@@ -156,6 +162,52 @@ enum ResponderKind: UInt8, CaseIterable, Identifiable, Codable {
         switch self {
         case .gemini: return "Gemini"
         case .nope: return "Nope"
+        case .webBrowser: return "WebBrowser"
+        }
+    }
+}
+
+/// Mirrors `speaker_core::responder::BrowserProvider`. The TOML stores the
+/// variant name (`"ChatGPT"` / `"Gemini"` / `"Claude"` / `"Custom"`); the
+/// FFI setter takes the 0..=3 level. Only consulted when the responder is
+/// `.webBrowser`. v0.8 N1 / N4 / N5.
+enum BrowserProvider: UInt8, CaseIterable, Identifiable, Codable {
+    case chatGPT = 0
+    case gemini = 1
+    case claude = 2
+    case custom = 3
+
+    var id: UInt8 { rawValue }
+
+    var label: String {
+        switch self {
+        case .chatGPT: return "ChatGPT"
+        case .gemini: return "Gemini"
+        case .claude: return "Claude"
+        case .custom: return "Custom"
+        }
+    }
+
+    /// Default URL the non-`Custom` providers resolve to — mirrors
+    /// `BrowserProvider::default_url` in the core. Shown read-only in the
+    /// Settings URL field so the user can see where they'll land. `nil`
+    /// for `Custom`, which reads the free-text `browserUrl` instead.
+    var defaultURL: String? {
+        switch self {
+        case .chatGPT: return "https://chatgpt.com/"
+        case .gemini: return "https://gemini.google.com/"
+        case .claude: return "https://claude.ai/"
+        case .custom: return nil
+        }
+    }
+
+    init?(tomlVariant: String) {
+        switch tomlVariant {
+        case "ChatGPT": self = .chatGPT
+        case "Gemini": self = .gemini
+        case "Claude": self = .claude
+        case "Custom": self = .custom
+        default: return nil
         }
     }
 }
@@ -170,6 +222,8 @@ private struct SettingsPayload: Decodable {
     let silenceTimeoutMs: UInt32
     let forceDefaultOutput: Bool
     let responder: String?
+    let browserProvider: String?
+    let browserUrl: String?
     let autoSessionOnBtConnect: Bool?
     let mainLanguage: String?
     let alternativeLanguage: String?
@@ -184,6 +238,8 @@ private struct SettingsPayload: Decodable {
         case silenceTimeoutMs = "silence_timeout_ms"
         case forceDefaultOutput = "force_default_output"
         case responder
+        case browserProvider = "browser_provider"
+        case browserUrl = "browser_url"
         case autoSessionOnBtConnect = "auto_session_on_bt_connect"
         case mainLanguage = "main_language"
         case alternativeLanguage = "alternative_language"
@@ -206,6 +262,10 @@ private struct StatusPayload: Decodable {
     let dailyInputClipCount: UInt32?
     let dailyInputClipCap: UInt32?
     let dailyInputClipCapReached: Bool?
+    /// One-shot browser-open request for the `.webBrowser` responder.
+    /// Present only on the snapshot that first reaches `SessionActive`;
+    /// omitted otherwise. v0.8 N3.
+    let openBrowser: OpenBrowserPayload?
 
     enum CodingKeys: String, CodingKey {
         case variant, name, message, revision
@@ -215,7 +275,20 @@ private struct StatusPayload: Decodable {
         case dailyInputClipCount = "daily_input_clip_count"
         case dailyInputClipCap = "daily_input_clip_cap"
         case dailyInputClipCapReached = "daily_input_clip_cap_reached"
+        case openBrowser = "open_browser"
     }
+}
+
+/// Decoded shape of the `open_browser` entry on the status snapshot.
+/// Matches the Rust `OpenBrowserEvent { kind, seq, url }`. The `seq` makes
+/// the open exactly-once: the shell tracks the highest `seq` it has acted
+/// on and ignores anything at or below it, so a poll racing the core (or
+/// the core clearing the entry on a later snapshot) can't open a second
+/// tab. v0.8 N3 / N5.
+private struct OpenBrowserPayload: Decodable {
+    let kind: String
+    let seq: UInt64
+    let url: String
 }
 
 /// One entry in the per-session activity log. Matches the Rust
@@ -379,9 +452,21 @@ final class Coordinator: ObservableObject {
     @Published var model: String {
         didSet { if oldValue != model { persistModel() } }
     }
-    /// Which responder handles input frames (Gemini Live vs. Nope). v0.2 N3.
+    /// Which responder handles input frames (Gemini Live / Nope / Browser).
+    /// v0.2 N3; `.webBrowser` added in v0.8 N5.
     @Published var responder: ResponderKind {
         didSet { if oldValue != responder { persistResponder() } }
+    }
+    /// Provider opened in the default browser when `responder == .webBrowser`.
+    /// Non-`Custom` providers resolve their URL from a code table; `.custom`
+    /// reads `browserUrl`. v0.8 N5.
+    @Published var browserProvider: BrowserProvider {
+        didSet { if oldValue != browserProvider { persistBrowserProvider() } }
+    }
+    /// Free-text URL used only when `browserProvider == .custom`. Validated
+    /// to `http`/`https` here and re-checked by the core. v0.8 N5.
+    @Published var browserUrl: String {
+        didSet { if oldValue != browserUrl { persistBrowserUrl() } }
     }
     /// When true (the default) a BT connect for the configured speaker
     /// auto-launches a session. When false the user can connect the
@@ -424,6 +509,10 @@ final class Coordinator: ObservableObject {
     private var statusTask: Task<Void, Never>?
     private var loopbackAutoStopTask: Task<Void, Never>?
     private var lastRevision: UInt64 = 0
+    /// Highest `open_browser` seq the shell has already acted on. Starts at
+    /// 0 (the core's first emitted seq is ≥ 1), so any real event outranks
+    /// it. v0.8 N5.
+    private var lastActedBrowserSeq: UInt64 = 0
 
     /// Track whether we suppress the next persisted write during the
     /// initial settings load (otherwise didSet would write the value
@@ -443,6 +532,8 @@ final class Coordinator: ObservableObject {
         self.sileroThreshold = 500
         self.model = ""
         self.responder = .gemini
+        self.browserProvider = .chatGPT
+        self.browserUrl = ""
         self.autoSessionOnBtConnect = true
         self.mainLanguage = "English"
         self.alternativeLanguage = ""
@@ -479,6 +570,10 @@ final class Coordinator: ObservableObject {
             if let raw = p.responder, let r = ResponderKind(tomlVariant: raw) {
                 self.responder = r
             }
+            if let raw = p.browserProvider, let bp = BrowserProvider(tomlVariant: raw) {
+                self.browserProvider = bp
+            }
+            self.browserUrl = p.browserUrl ?? ""
             if let auto = p.autoSessionOnBtConnect {
                 self.autoSessionOnBtConnect = auto
             }
@@ -558,6 +653,23 @@ final class Coordinator: ObservableObject {
         guard !loadingSettings else { return }
         let rc = speaker_core_settings_set_responder(responder.rawValue)
         if rc != 0 { log.error("settings_set_responder failed: \(rc)") }
+    }
+
+    private func persistBrowserProvider() {
+        guard !loadingSettings else { return }
+        let rc = speaker_core_settings_set_browser_provider(browserProvider.rawValue)
+        if rc != 0 { log.error("settings_set_browser_provider failed: \(rc)") }
+    }
+
+    private func persistBrowserUrl() {
+        guard !loadingSettings else { return }
+        // The core re-applies the http/https scheme guard and rejects an
+        // empty / invalid URL (-100). Skip those drafts rather than spam
+        // rejection logs as the user types — the field just keeps its last
+        // persisted value, matching the model / language setters.
+        guard !browserUrl.isEmpty else { return }
+        let rc = browserUrl.withCString { speaker_core_settings_set_browser_url($0) }
+        if rc != 0 { log.error("settings_set_browser_url failed: \(rc)") }
     }
 
     private func persistAutoSessionOnBtConnect() {
@@ -964,9 +1076,34 @@ final class Coordinator: ObservableObject {
             currentSessionId = sessId
             currentSessionStartUnix = sessStart
             currentSessionTrigger = sessTrigger
+            if let ob = p.openBrowser {
+                handleOpenBrowser(seq: ob.seq, url: ob.url)
+            }
         } catch {
             log.error("decode status failed: \(error.localizedDescription, privacy: .public)")
         }
+    }
+
+    /// Act on a one-shot `open_browser` event: open exactly one tab per
+    /// session. The `seq` is monotonic across sessions, so acting only on
+    /// a strictly-higher seq makes this exactly-once even if a poll races
+    /// the core or the entry lingers on a later snapshot. v0.8 N5.
+    private func handleOpenBrowser(seq: UInt64, url urlString: String) {
+        guard seq > lastActedBrowserSeq else { return }
+        // Mark acted regardless of outcome so a malformed URL doesn't get
+        // re-evaluated (and re-logged) on every subsequent poll.
+        lastActedBrowserSeq = seq
+        // Belt-and-braces scheme re-check — the core already constrains the
+        // URL to http/https in `resolved_browser_url`, but the shell is the
+        // thing actually handing a URL to the OS, so it guards too (N5).
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https" else {
+            log.error("open_browser: rejecting non-http(s) url for seq \(seq)")
+            return
+        }
+        log.info("open_browser: opening tab for seq \(seq)")
+        NSWorkspace.shared.open(url)
     }
 
     private static func statusEvent(from p: StatusPayload) -> StatusEvent {
