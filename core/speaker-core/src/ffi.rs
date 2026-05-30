@@ -658,10 +658,16 @@ pub extern "C" fn speaker_core_settings_get() -> *mut c_char {
     }
 }
 
-/// Set the target BT speaker address. Pass null to clear the selection.
-/// Persists to TOML. Returns 0 on success or a negative `ConfigError::code()`.
+/// Set the target BT speaker address and its friendly name. Pass null for
+/// `address` to clear the selection (the name is cleared too). `name` may
+/// be null when the friendly name isn't known — the status then falls back
+/// to the address. Persists to TOML. Returns 0 on success or a negative
+/// `ConfigError::code()`.
 #[no_mangle]
-pub extern "C" fn speaker_core_settings_set_target(address: *const c_char) -> i32 {
+pub extern "C" fn speaker_core_settings_set_target(
+    address: *const c_char,
+    name: *const c_char,
+) -> i32 {
     let addr = if address.is_null() {
         None
     } else {
@@ -671,7 +677,20 @@ pub extern "C" fn speaker_core_settings_set_target(address: *const c_char) -> i3
             Err(_) => return -100,
         }
     };
-    match Settings::update(|s| s.target_address = addr) {
+    // The name only makes sense alongside an address; clearing the target
+    // clears the name too.
+    let target_name = match (addr.is_some(), name.is_null()) {
+        (false, _) | (_, true) => None,
+        (true, false) => match unsafe { CStr::from_ptr(name) }.to_str() {
+            Ok(s) if !s.is_empty() => Some(s.to_string()),
+            Ok(_) => None,
+            Err(_) => return -100,
+        },
+    };
+    match Settings::update(|s| {
+        s.target_address = addr;
+        s.target_name = target_name;
+    }) {
         Ok(_) => {
             Coordinator::instance().refresh_settings();
             0

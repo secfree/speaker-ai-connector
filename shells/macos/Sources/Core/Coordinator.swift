@@ -503,9 +503,18 @@ final class Coordinator: ObservableObject {
         watcher.targetAddress = targetAddress
         let rc: Int32
         if let addr = targetAddress {
-            rc = addr.withCString { speaker_core_settings_set_target($0) }
+            // Resolve the friendly name from the paired list so the core
+            // can show "SRS-XB100" in the Waiting status before the speaker
+            // has connected — otherwise it only knows the MAC address.
+            let name = watcher.pairedDevices().first { $0.address == addr }?.name
+            rc = addr.withCString { addrPtr in
+                if let name {
+                    return name.withCString { speaker_core_settings_set_target(addrPtr, $0) }
+                }
+                return speaker_core_settings_set_target(addrPtr, nil)
+            }
         } else {
-            rc = speaker_core_settings_set_target(nil)
+            rc = speaker_core_settings_set_target(nil, nil)
         }
         if rc != 0 { log.error("settings_set_target failed: \(rc)") }
         refreshStatusFromCore()

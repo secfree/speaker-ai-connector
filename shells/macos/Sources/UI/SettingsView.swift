@@ -94,10 +94,11 @@ struct SettingsView: View {
         .padding(.vertical, 12)
     }
 
-    /// `status.menuBarText` is produced by the core and refers to the
-    /// target speaker by MAC address. Swap in the friendly device name
-    /// (already cached for the Speaker picker) so the banner reads the
-    /// same as the picker instead of showing a raw address.
+    /// `status.menuBarText` is produced by the core, which now resolves the
+    /// friendly device name itself (persisted with the target). This swap
+    /// stays as a fallback for targets chosen before the name was persisted
+    /// — when the core still reports the raw MAC, substitute the cached name
+    /// so the banner reads the same as the picker.
     private var statusText: String {
         let raw = coordinator.status.menuBarText
         guard let addr = coordinator.targetAddress, let name = savedDeviceName else {

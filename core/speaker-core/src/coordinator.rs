@@ -173,14 +173,31 @@ pub struct StatusSnapshot {
 }
 
 impl Inner {
+    /// Best friendly name for the configured target `addr`: the name learned
+    /// from an actual BT connect this run, then the name persisted with the
+    /// target (from the picker), then the raw address as a last resort. This
+    /// keeps the menu bar and Settings banner reading the same.
+    fn resolved_target_name(&self, addr: &str) -> String {
+        self.target_name
+            .as_deref()
+            .filter(|n| !n.is_empty() && *n != addr)
+            .or_else(|| {
+                self.settings
+                    .target_name
+                    .as_deref()
+                    .filter(|n| !n.is_empty() && *n != addr)
+            })
+            .unwrap_or(addr)
+            .to_string()
+    }
+
     fn status(&self) -> StatusEvent {
         match &self.state {
-            SessionState::Idle => match (&self.settings.target_address, &self.target_name) {
-                (None, _) => StatusEvent::NoDeviceSelected,
-                (Some(addr), Some(name)) if name != addr => {
-                    StatusEvent::WaitingForDevice { name: name.clone() }
-                }
-                (Some(addr), _) => StatusEvent::WaitingForDevice { name: addr.clone() },
+            SessionState::Idle => match &self.settings.target_address {
+                None => StatusEvent::NoDeviceSelected,
+                Some(addr) => StatusEvent::WaitingForDevice {
+                    name: self.resolved_target_name(addr),
+                },
             },
             SessionState::Launching {
                 kind: SessionKind::Bluetooth,
@@ -512,10 +529,7 @@ impl Coordinator {
         let (addr, name) = {
             let inner = self.inner.lock().unwrap();
             match &inner.settings.target_address {
-                Some(a) => (
-                    a.clone(),
-                    inner.target_name.clone().unwrap_or_else(|| a.clone()),
-                ),
+                Some(a) => (a.clone(), inner.resolved_target_name(a)),
                 None => return inner.status(),
             }
         };
@@ -529,10 +543,7 @@ impl Coordinator {
         let (addr, name) = {
             let inner = self.inner.lock().unwrap();
             match &inner.settings.target_address {
-                Some(a) => (
-                    a.clone(),
-                    inner.target_name.clone().unwrap_or_else(|| a.clone()),
-                ),
+                Some(a) => (a.clone(), inner.resolved_target_name(a)),
                 None => return inner.status(),
             }
         };

@@ -136,6 +136,13 @@ pub struct Settings {
     /// `NoDeviceSelected` and BT events are ignored.
     #[serde(default)]
     pub target_address: Option<String>,
+    /// Friendly name of the paired speaker (e.g. "SRS-XB100"), captured
+    /// from the Bluetooth paired list when the target is chosen. Lets the
+    /// `WaitingForDevice` status read by name before the speaker has ever
+    /// connected this run — otherwise the core only knows the MAC address.
+    /// `None` falls back to showing `target_address`.
+    #[serde(default)]
+    pub target_name: Option<String>,
     /// Gemini Live model id. Defaults to the constant in `gemini.rs`.
     #[serde(default = "default_model")]
     pub model: String,
@@ -220,6 +227,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             target_address: None,
+            target_name: None,
             model: default_model(),
             vad_engine: VadEngineKind::default(),
             vad_sensitivity: VadSensitivity::default(),
@@ -304,6 +312,7 @@ mod tests {
     fn settings_roundtrip_through_toml() {
         let s = Settings {
             target_address: Some("aa:bb:cc:dd:ee:ff".into()),
+            target_name: Some("SRS-XB100".into()),
             model: "models/gemini-test".into(),
             vad_engine: VadEngineKind::Silero,
             vad_sensitivity: VadSensitivity::Aggressive,

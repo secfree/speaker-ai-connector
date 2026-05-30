@@ -192,7 +192,10 @@ char *speaker_core_settings_get(void);
 // snapshot. Return 0 on success, negative ConfigError code on failure
 // (-100 invalid input, -101 invalid sensitivity / responder level,
 // -402 io, -403 toml).
-int speaker_core_settings_set_target(const char *address);   // NULL clears
+// NULL address clears the selection (and the name). `name` is the friendly
+// device name (e.g. "SRS-XB100") so the WaitingForDevice status reads by
+// name before the speaker has connected; pass NULL when unknown.
+int speaker_core_settings_set_target(const char *address, const char *name);
 int speaker_core_settings_set_model(const char *model);
 int speaker_core_settings_set_vad_sensitivity(unsigned char level);
 int speaker_core_settings_set_silence_timeout_ms(unsigned int ms);
