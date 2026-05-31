@@ -184,6 +184,15 @@ pub struct Settings {
     /// providers resolve their URL from the code table. v0.8 N1.
     #[serde(default)]
     pub browser_url: String,
+    /// When `true`, the macOS shell auto-clicks the provider's voice
+    /// button after opening the browser tab — one fewer manual step. Off
+    /// by default; opt-in because it is fragile by nature (selector
+    /// drift). The Rust core never sees a selector: this single bool is
+    /// the only thing it learns about Stage B. Only meaningful when
+    /// `responder == WebBrowser` and `browser_provider != Custom`.
+    /// v0.9 N1.
+    #[serde(default)]
+    pub auto_click_voice: bool,
     /// When `true` (the default), a Bluetooth connect for the configured
     /// target launches a session immediately — the screen-free flow this
     /// app exists for. When `false`, the user can connect the speaker
@@ -249,6 +258,7 @@ impl Default for Settings {
             responder: ResponderKind::default(),
             browser_provider: BrowserProvider::default(),
             browser_url: String::new(),
+            auto_click_voice: false,
             auto_session_on_bt_connect: default_auto_session_on_bt_connect(),
             main_language: default_main_language(),
             alternative_language: None,
@@ -359,6 +369,7 @@ mod tests {
             responder: ResponderKind::Nope,
             browser_provider: BrowserProvider::Claude,
             browser_url: "https://example.com/voice".into(),
+            auto_click_voice: true,
             auto_session_on_bt_connect: false,
             main_language: "Mandarin Chinese".into(),
             alternative_language: Some("English".into()),
@@ -401,6 +412,38 @@ responder = "Gemini"
         .unwrap();
         assert_eq!(parsed.browser_provider, BrowserProvider::ChatGPT);
         assert_eq!(parsed.browser_url, "");
+    }
+
+    #[test]
+    fn auto_click_voice_round_trips() {
+        // The Stage B opt-in serializes as its own top-level bool key,
+        // same as `force_default_output`.
+        let s = Settings {
+            responder: ResponderKind::WebBrowser,
+            browser_provider: BrowserProvider::ChatGPT,
+            auto_click_voice: true,
+            ..Settings::default()
+        };
+        let text = toml::to_string_pretty(&s).unwrap();
+        assert!(text.contains("auto_click_voice = true"));
+        let parsed: Settings = toml::from_str(&text).unwrap();
+        assert_eq!(parsed, s);
+    }
+
+    #[test]
+    fn auto_click_voice_defaults_off_for_older_configs() {
+        // Pre-v0.9 configs predate the key — `#[serde(default)]` loads it
+        // as `false` (off) without a migration, exactly like
+        // `force_default_output`.
+        let parsed: Settings = toml::from_str(
+            r#"
+target_address = "aa:bb:cc:dd:ee:ff"
+model = "models/gemini-test"
+responder = "WebBrowser"
+"#,
+        )
+        .unwrap();
+        assert!(!parsed.auto_click_voice);
     }
 
     #[test]

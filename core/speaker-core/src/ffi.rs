@@ -925,6 +925,24 @@ pub extern "C" fn speaker_core_settings_set_force_default_output(enabled: i32) -
     }
 }
 
+/// Toggle whether the macOS shell auto-clicks the provider's voice button
+/// after opening the browser tab (Stage B). Off by default and opt-in —
+/// fragile by nature (selector drift) — and only meaningful for the
+/// `WebBrowser` responder with a non-`Custom` provider. The core never
+/// learns what a "voice button" is; this single bool is all it knows.
+/// Persisted to TOML. Returns 0 on success or a negative
+/// `ConfigError::code()`. v0.9 N1.
+#[no_mangle]
+pub extern "C" fn speaker_core_settings_set_auto_click_voice(enabled: i32) -> i32 {
+    match Settings::update(|s| s.auto_click_voice = enabled != 0) {
+        Ok(_) => {
+            Coordinator::instance().refresh_settings();
+            0
+        }
+        Err(e) => e.code(),
+    }
+}
+
 /// Primary language the model replies in. Free-text name (e.g. "English",
 /// "Mandarin Chinese") — templated into the Gemini system instruction.
 /// Empty / null is rejected; the persona requires a language to pin.

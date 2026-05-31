@@ -212,6 +212,10 @@ int speaker_core_settings_set_browser_provider(unsigned char level);
 // browser_provider == Custom. Re-applies the http/https scheme guard —
 // returns -100 for null/non-UTF-8 or a non-http(s) scheme.
 int speaker_core_settings_set_browser_url(const char *url);
+// v0.9 N1: opt-in Stage B auto-click of the provider's voice button. 0
+// (default) = off; non-zero = on. Only meaningful for the WebBrowser
+// responder with a non-Custom provider; the core never sees a selector.
+int speaker_core_settings_set_auto_click_voice(int enabled);
 // v0.3 N1: VAD engine level — 0 = WebRTC (default), 1 = Silero.
 int speaker_core_settings_set_vad_engine(unsigned char level);
 // v0.3 N1: unified per-engine tuning setter — semantics depend on the

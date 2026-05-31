@@ -34,10 +34,10 @@ Mirror the `force_default_output` bool precedent exactly — same `Settings`
 shape, same integer FFI setter convention. See
 [design — Stage B mechanism](design-browser-tab-voice-mode.md#mechanism).
 
-- [todo] Add `auto_click_voice: bool` (default `false`) to `Settings` ([config.rs:170](../core/speaker-core/src/config.rs)), with its own `#[serde(default)]` key — no migration, exactly like `force_default_output`. Wire the default in `Default for Settings` ([config.rs:248](../core/speaker-core/src/config.rs)).
-- [todo] Add `speaker_core_settings_set_auto_click_voice(enabled: i32) -> i32` ([ffi.rs:918](../core/speaker-core/src/ffi.rs)), copying the `speaker_core_settings_set_force_default_output` body (`enabled != 0`). Update the bridging header.
-- [todo] Confirm `auto_click_voice` serializes through the unchanged `speaker_core_settings_get` JSON (it's a plain `Settings` field — no new getter needed), so the shell reads it back the same way it reads `force_default_output`.
-- [todo] Round-trip tests in `config::tests`: the new key serializes/deserializes and an older config missing `auto_click_voice` loads with `false`. Mirror the `force_default_output` test rows ([config.rs:358](../core/speaker-core/src/config.rs)).
+- [done] Add `auto_click_voice: bool` (default `false`) to `Settings` ([config.rs](../core/speaker-core/src/config.rs)), with its own `#[serde(default)]` key — no migration, exactly like `force_default_output`. Wire the default in `Default for Settings`.
+- [done] Add `speaker_core_settings_set_auto_click_voice(enabled: i32) -> i32` ([ffi.rs](../core/speaker-core/src/ffi.rs)), copying the `speaker_core_settings_set_force_default_output` body (`enabled != 0`). Bridging header updated.
+- [done] Confirmed `auto_click_voice` serializes through the unchanged `speaker_core_settings_get` JSON (it's a plain `Settings` field — no new getter needed), so the shell reads it back the same way it reads `force_default_output`.
+- [done] Round-trip tests in `config::tests`: `auto_click_voice_round_trips` (the new key serializes/deserializes) and `auto_click_voice_defaults_off_for_older_configs` (an older config missing the key loads with `false`). Mirror the `force_default_output` test rows.
 
 ## N2 — Bundled selector recipe file + loader (shell)
 
