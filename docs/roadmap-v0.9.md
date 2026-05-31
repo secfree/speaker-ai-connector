@@ -64,9 +64,9 @@ The per-browser dialect layer. See
 Hook the runner into the existing Stage-A open path — additively. See
 [design — Stage B mechanism](design-browser-tab-voice-mode.md#mechanism).
 
-- [todo] In `handleOpenBrowser` ([Coordinator.swift:1109](../shells/macos/Sources/Core/Coordinator.swift)), after the existing `NSWorkspace.shared.open(url)`, if `auto_click_voice` is on **and** a recipe exists for the resolved provider, kick off the N3 click sequence (async — do not block the poll loop or the open). When off, behavior is byte-for-byte the Stage-A path.
-- [todo] Mirror `auto_click_voice` as an `@Published` property on `Coordinator`, loaded from `speaker_core_settings_get` and flushed through `speaker_core_settings_set_auto_click_voice` (N1) — same pattern as `forceDefaultOutput`. No Swift-side persistence; the core owns the TOML.
-- [todo] The click sequence runs once per `open_browser` event (it lives downstream of the existing one-shot `seq` guard at [Coordinator.swift:1110](../shells/macos/Sources/Core/Coordinator.swift)), so it inherits exactly-once for free — confirm it does not re-fire on subsequent polls.
+- [done] In `handleOpenBrowser` ([Coordinator.swift](../shells/macos/Sources/Core/Coordinator.swift)), after the existing `NSWorkspace.shared.open(url)`, a new `maybeAutoClickVoice(url:)` kicks off the N3 `BrowserScriptRunner` only when `autoClickVoice` is on **and** `VoiceSelectorsLoader.shared.recipe(for: browserProvider)` returns a recipe (so `Custom` / unseeded providers are a silent no-op). The runner is async/non-blocking; a failure surfaces its `menuMessage` via `status = .error(...)`, the same channel as Gemini auth failures. When off, the path is byte-for-byte the Stage-A open.
+- [done] `auto_click_voice` mirrored as `@Published var autoClickVoice` on `Coordinator`, defaulted `false`, loaded from `speaker_core_settings_get` (new `SettingsPayload.autoClickVoice` key), flushed through `persistAutoClickVoice()` → `speaker_core_settings_set_auto_click_voice` (N1) — same pattern as `forceDefaultOutput`. No Swift-side persistence.
+- [done] The click sequence sits downstream of the one-shot `seq` guard (`guard seq > lastActedBrowserSeq`) in `handleOpenBrowser`, so it inherits exactly-once and does not re-fire on subsequent polls. A held `browserScriptRunner` lets the poll loop outlive the call. Verified the app builds (`xcodebuild … CODE_SIGNING_ALLOWED=NO`).
 
 ## N5 — Settings UI + Automation permission
 

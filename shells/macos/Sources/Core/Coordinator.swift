@@ -235,6 +235,7 @@ private struct SettingsPayload: Decodable {
     let responder: String?
     let browserProvider: String?
     let browserUrl: String?
+    let autoClickVoice: Bool?
     let autoSessionOnBtConnect: Bool?
     let mainLanguage: String?
     let alternativeLanguage: String?
@@ -251,6 +252,7 @@ private struct SettingsPayload: Decodable {
         case responder
         case browserProvider = "browser_provider"
         case browserUrl = "browser_url"
+        case autoClickVoice = "auto_click_voice"
         case autoSessionOnBtConnect = "auto_session_on_bt_connect"
         case mainLanguage = "main_language"
         case alternativeLanguage = "alternative_language"
@@ -479,6 +481,13 @@ final class Coordinator: ObservableObject {
     @Published var browserUrl: String {
         didSet { if oldValue != browserUrl { persistBrowserUrl() } }
     }
+    /// Opt-in: after opening the browser tab, auto-click the provider's voice
+    /// button via a bundled selector recipe. Off by default; a no-op for
+    /// `Custom` (no recipe). Fragile by nature — degrades to a manual-fallback
+    /// menu message. v0.9 Stage B (N4).
+    @Published var autoClickVoice: Bool {
+        didSet { if oldValue != autoClickVoice { persistAutoClickVoice() } }
+    }
     /// When true (the default) a BT connect for the configured speaker
     /// auto-launches a session. When false the user can connect the
     /// speaker just to play music; "Start session" from the menu bar
@@ -524,6 +533,10 @@ final class Coordinator: ObservableObject {
     /// 0 (the core's first emitted seq is ≥ 1), so any real event outranks
     /// it. v0.8 N5.
     private var lastActedBrowserSeq: UInt64 = 0
+    /// Drives the opt-in voice-button auto-click (v0.9 Stage B). Held so a
+    /// poll-loop click sequence outlives the `handleOpenBrowser` call that
+    /// started it.
+    private let browserScriptRunner = BrowserScriptRunner()
 
     /// Track whether we suppress the next persisted write during the
     /// initial settings load (otherwise didSet would write the value
@@ -545,6 +558,7 @@ final class Coordinator: ObservableObject {
         self.responder = .gemini
         self.browserProvider = .chatGPT
         self.browserUrl = ""
+        self.autoClickVoice = false
         self.autoSessionOnBtConnect = true
         self.mainLanguage = "English"
         self.alternativeLanguage = ""
@@ -585,6 +599,7 @@ final class Coordinator: ObservableObject {
                 self.browserProvider = bp
             }
             self.browserUrl = p.browserUrl ?? ""
+            self.autoClickVoice = p.autoClickVoice ?? false
             if let auto = p.autoSessionOnBtConnect {
                 self.autoSessionOnBtConnect = auto
             }
@@ -687,6 +702,12 @@ final class Coordinator: ObservableObject {
         guard !loadingSettings else { return }
         let rc = speaker_core_settings_set_auto_session_on_bt_connect(autoSessionOnBtConnect ? 1 : 0)
         if rc != 0 { log.error("settings_set_auto_session_on_bt_connect failed: \(rc)") }
+    }
+
+    private func persistAutoClickVoice() {
+        guard !loadingSettings else { return }
+        let rc = speaker_core_settings_set_auto_click_voice(autoClickVoice ? 1 : 0)
+        if rc != 0 { log.error("settings_set_auto_click_voice failed: \(rc)") }
     }
 
     private func persistMainLanguage() {
@@ -1122,6 +1143,32 @@ final class Coordinator: ObservableObject {
         }
         log.info("open_browser: opening tab for seq \(seq)")
         NSWorkspace.shared.open(url)
+        maybeAutoClickVoice(url: url)
+    }
+
+    /// Stage B: if auto-click is enabled and a selector recipe exists for the
+    /// configured provider, kick off the N3 click sequence against the tab we
+    /// just opened. Runs once per `open_browser` event (it sits downstream of
+    /// the `seq` one-shot guard above, so it inherits exactly-once). Async and
+    /// non-blocking; a `Custom` provider — or any provider without a bundled
+    /// recipe — is a silent no-op, leaving the Stage-A open path untouched.
+    /// v0.9 N4.
+    private func maybeAutoClickVoice(url: URL) {
+        guard autoClickVoice else { return }
+        guard let recipe = VoiceSelectorsLoader.shared.recipe(for: browserProvider) else {
+            log.info("auto-click: no recipe for \(self.browserProvider.tomlVariant, privacy: .public) — manual click")
+            return
+        }
+        log.info("auto-click: starting voice-button sequence")
+        browserScriptRunner.run(recipe: recipe, openedURL: url) { [weak self] result in
+            switch result {
+            case .success:
+                log.info("auto-click: voice button clicked")
+            case .failure(let failure):
+                log.error("auto-click failed: \(String(describing: failure), privacy: .public)")
+                self?.status = .error(failure.menuMessage)
+            }
+        }
     }
 
     private static func statusEvent(from p: StatusPayload) -> StatusEvent {
