@@ -928,7 +928,14 @@ final class Coordinator: ObservableObject {
 
     private func beginLoopbackStream() {
         if forceDefaultOutput, let addr = targetAddress {
-            let rc = addr.withCString { speaker_core_audio_force_default_output($0) }
+            // Pass the paired device name too: speakers whose CoreAudio UID
+            // doesn't embed the MAC (e.g. Sony SRS-XB100) only match by name.
+            let name = watcher.pairedDevices().first { $0.address == addr }?.name ?? ""
+            let rc = addr.withCString { addrC in
+                name.withCString { nameC in
+                    speaker_core_audio_force_default_output(addrC, nameC)
+                }
+            }
             if rc != 0 {
                 log.warning("force-default-output failed (code \(rc, privacy: .public))")
             }

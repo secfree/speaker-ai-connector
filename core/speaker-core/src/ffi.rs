@@ -185,7 +185,11 @@ pub extern "C" fn speaker_core_vad_diagnostic_stop() {
 }
 
 /// Force the system default output to the Bluetooth speaker whose MAC
-/// address matches `address` (any common separator/case is accepted).
+/// address matches `address` (any common separator/case is accepted) or
+/// whose CoreAudio device name matches `name`. `name` may be null/empty
+/// when the caller has no friendly name — the MAC match still applies.
+/// Passing a name lets speakers whose UID doesn't embed the MAC (e.g. Sony
+/// SRS-XB100, which reports a UUID-style UID) still match.
 ///
 /// Returns 0 on success, a negative `RoutingError::code()` on failure,
 /// or -100 if the address pointer is null / non-UTF-8.
@@ -196,7 +200,10 @@ pub extern "C" fn speaker_core_vad_diagnostic_stop() {
 /// after a BT speaker connects.
 #[cfg(target_os = "macos")]
 #[no_mangle]
-pub extern "C" fn speaker_core_audio_force_default_output(address: *const c_char) -> i32 {
+pub extern "C" fn speaker_core_audio_force_default_output(
+    address: *const c_char,
+    name: *const c_char,
+) -> i32 {
     if address.is_null() {
         return -100;
     }
@@ -204,7 +211,12 @@ pub extern "C" fn speaker_core_audio_force_default_output(address: *const c_char
         Ok(s) => s,
         Err(_) => return -100,
     };
-    match routing::force_default_output(s) {
+    let name = if name.is_null() {
+        ""
+    } else {
+        unsafe { CStr::from_ptr(name) }.to_str().unwrap_or("")
+    };
+    match routing::force_default_output(s, name) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("speaker-core: force-default-output failed: {e:?}");

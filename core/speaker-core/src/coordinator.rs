@@ -690,7 +690,7 @@ impl Coordinator {
         #[cfg(target_os = "macos")]
         if kind == SessionKind::Bluetooth && settings.force_default_output {
             if let Some(addr) = &target_address {
-                if let Err(e) = routing::force_default_output(addr) {
+                if let Err(e) = routing::force_default_output_retrying(addr, &name) {
                     eprintln!("speaker-core: force-default-output failed: {e:?}");
                 }
             }
@@ -794,7 +794,7 @@ impl Coordinator {
         #[cfg(target_os = "macos")]
         if kind == SessionKind::Bluetooth && settings.force_default_output {
             if let Some(addr) = &target_address {
-                if let Err(e) = routing::force_default_output(addr) {
+                if let Err(e) = routing::force_default_output_retrying(addr, &name) {
                     eprintln!(
                         "speaker-core: force-default-output failed (browser mode): {e:?}"
                     );

@@ -24,9 +24,11 @@ void speaker_core_audio_loopback_stop(void);
 int speaker_core_set_silero_model_path(const char *path);
 
 // Override the macOS system default output to the BT speaker whose UID
-// embeds the given MAC address. Returns 0 on success, negative on error
+// embeds the given MAC address, or whose CoreAudio device name matches
+// `name` (fallback for speakers whose UID has no MAC, e.g. Sony SRS-XB100).
+// `name` may be NULL/empty. Returns 0 on success, negative on error
 // (-20 CoreAudio failure, -21 no matching device, -100 bad address).
-int speaker_core_audio_force_default_output(const char *address);
+int speaker_core_audio_force_default_output(const char *address, const char *name);
 
 // Start the M3 VAD diagnostic: default input → 16 kHz mono → libfvad
 // relay, logging gate open/close transitions to stderr. `sensitivity`

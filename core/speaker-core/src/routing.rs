@@ -20,6 +20,18 @@
 #![cfg(target_os = "macos")]
 
 use std::ffi::{c_char, c_void, CStr};
+use std::time::{Duration, Instant};
+
+/// How long [`force_default_output_retrying`] polls for the speaker's
+/// CoreAudio output device to appear, and how often. macOS registers the
+/// Bluetooth output device a short while *after* the IOBluetooth connect
+/// notification that triggers the session, so a single immediate attempt
+/// loses the race (observed on a Sony SRS-XB100: a connect-then-launch hit
+/// `NoMatchingDevice` while a speaker already connected before app launch
+/// matched on the first try). Polling runs on the launch worker thread, so
+/// blocking here is fine.
+const ROUTING_POLL_TIMEOUT: Duration = Duration::from_secs(8);
+const ROUTING_POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 pub enum RoutingError {
@@ -58,6 +70,7 @@ const fn fcc(s: &[u8; 4]) -> u32 {
 const PROP_DEVICES: u32 = fcc(b"dev#");
 const PROP_DEFAULT_OUTPUT_DEVICE: u32 = fcc(b"dOut");
 const PROP_DEVICE_UID: u32 = fcc(b"uid ");
+const PROP_DEVICE_NAME: u32 = fcc(b"lnam");
 const PROP_STREAM_CONFIGURATION: u32 = fcc(b"slay");
 const SCOPE_GLOBAL: u32 = fcc(b"glob");
 const SCOPE_OUTPUT: u32 = fcc(b"outp");
@@ -152,6 +165,24 @@ fn uid_matches(uid: &str, target_hex: &str) -> bool {
     uid_hex.contains(target_hex)
 }
 
+/// True if CoreAudio device name `name` looks like the BT device named
+/// `target`. Some speakers (e.g. Sony SRS-XB100) report a UUID-style UID
+/// that doesn't embed the MAC, so the MAC match in `uid_matches` never
+/// fires — the friendly name is the only correlation left. Compared
+/// case-insensitively and trimmed; we accept a substring either way so a
+/// CoreAudio suffix (or a BT-stack suffix) doesn't break the match.
+fn name_matches(name: &str, target: &str) -> bool {
+    let target = target.trim().to_ascii_lowercase();
+    if target.is_empty() {
+        return false;
+    }
+    let name = name.trim().to_ascii_lowercase();
+    if name.is_empty() {
+        return false;
+    }
+    name.contains(&target) || target.contains(&name)
+}
+
 unsafe fn get_all_device_ids() -> Result<Vec<AudioObjectID>, RoutingError> {
     let address = addr(PROP_DEVICES, SCOPE_GLOBAL);
     let mut size: u32 = 0;
@@ -225,7 +256,17 @@ unsafe fn has_output_streams(device: AudioObjectID) -> bool {
 }
 
 unsafe fn device_uid(device: AudioObjectID) -> Option<String> {
-    let address = addr(PROP_DEVICE_UID, SCOPE_GLOBAL);
+    cfstring_property(device, PROP_DEVICE_UID)
+}
+
+unsafe fn device_name(device: AudioObjectID) -> Option<String> {
+    cfstring_property(device, PROP_DEVICE_NAME)
+}
+
+/// Read a CoreAudio device property that returns a `CFStringRef` (UID, name)
+/// as an owned Rust `String`. Both selectors live in the global scope.
+unsafe fn cfstring_property(device: AudioObjectID, selector: u32) -> Option<String> {
+    let address = addr(selector, SCOPE_GLOBAL);
     let mut cf: CFStringRef = std::ptr::null();
     let mut size = std::mem::size_of::<CFStringRef>() as u32;
     let status = AudioObjectGetPropertyData(
@@ -278,32 +319,105 @@ unsafe fn set_default_output(device: AudioObjectID) -> Result<(), RoutingError> 
     }
 }
 
-/// Set the system default output device to the Bluetooth speaker whose
-/// MAC address matches `bt_address`. The match is hex-only on the device
-/// UID, so colon/hyphen/case variations all work.
-pub fn force_default_output(bt_address: &str) -> Result<(), RoutingError> {
+/// Set the system default output device to the Bluetooth speaker
+/// identified by `bt_address` (MAC) or `bt_name` (friendly name). We match
+/// the MAC against the device UID first (hex-only, so colon/hyphen/case
+/// variations all work); if that fails — some speakers report a UUID-style
+/// UID with no MAC in it — we fall back to matching `bt_name` against the
+/// CoreAudio device name. `bt_name` may be empty when the caller has no
+/// name; the MAC path still applies.
+pub fn force_default_output(bt_address: &str, bt_name: &str) -> Result<(), RoutingError> {
     let target = normalize_mac(bt_address);
-    if target.is_empty() {
+    if target.is_empty() && bt_name.trim().is_empty() {
         return Err(RoutingError::NoMatchingDevice);
     }
+    match unsafe { try_set_default_output_once(&target, bt_name) }? {
+        None => Ok(()),
+        Some(candidates) => {
+            log_no_match(&target, bt_name, &candidates, None);
+            Err(RoutingError::NoMatchingDevice)
+        }
+    }
+}
 
-    unsafe {
-        let devices = get_all_device_ids()?;
-        for id in devices {
-            if !has_output_streams(id) {
-                continue;
-            }
-            let Some(uid) = device_uid(id) else { continue };
-            if uid_matches(&uid, &target) {
-                set_default_output(id)?;
-                eprintln!(
-                    "speaker-core: forced default output to device {id} (uid={uid})"
-                );
-                return Ok(());
+/// Like [`force_default_output`], but polls for up to `ROUTING_POLL_TIMEOUT`
+/// while the target device is merely *absent* — macOS registers the BT
+/// output device a beat after the connect notification, so a single attempt
+/// races and loses. A CoreAudio enumeration / set error fails immediately
+/// (retrying wouldn't help). Only the final miss logs the candidate list, so
+/// a first-try hit stays quiet and a slow appearance doesn't spam the log.
+///
+/// Blocks the calling thread between polls — call it from the launch worker,
+/// never the UI thread.
+pub fn force_default_output_retrying(
+    bt_address: &str,
+    bt_name: &str,
+) -> Result<(), RoutingError> {
+    let target = normalize_mac(bt_address);
+    if target.is_empty() && bt_name.trim().is_empty() {
+        return Err(RoutingError::NoMatchingDevice);
+    }
+    let deadline = Instant::now() + ROUTING_POLL_TIMEOUT;
+    loop {
+        match unsafe { try_set_default_output_once(&target, bt_name) }? {
+            None => return Ok(()),
+            Some(candidates) => {
+                if Instant::now() >= deadline {
+                    log_no_match(&target, bt_name, &candidates, Some(ROUTING_POLL_TIMEOUT));
+                    return Err(RoutingError::NoMatchingDevice);
+                }
+                std::thread::sleep(ROUTING_POLL_INTERVAL);
             }
         }
     }
-    Err(RoutingError::NoMatchingDevice)
+}
+
+/// One scan of the output devices. On a match, sets it as the system default
+/// and returns `Ok(None)`. On no match, returns `Ok(Some(candidates))` — the
+/// `uid (name)` descriptions of every output device seen — so the caller can
+/// decide whether to retry or log. CoreAudio errors propagate.
+unsafe fn try_set_default_output_once(
+    target_hex: &str,
+    bt_name: &str,
+) -> Result<Option<Vec<String>>, RoutingError> {
+    let devices = get_all_device_ids()?;
+    let mut candidates: Vec<String> = Vec::new();
+    for id in devices {
+        if !has_output_streams(id) {
+            continue;
+        }
+        let Some(uid) = device_uid(id) else { continue };
+        let name = device_name(id);
+        let name_hit = name.as_deref().is_some_and(|n| name_matches(n, bt_name));
+        if uid_matches(&uid, target_hex) || name_hit {
+            set_default_output(id)?;
+            eprintln!(
+                "speaker-core: forced default output to device {id} \
+                 (uid={uid}, name={:?})",
+                name.as_deref().unwrap_or("?")
+            );
+            return Ok(None);
+        }
+        candidates.push(format!("{uid} ({})", name.as_deref().unwrap_or("?")));
+    }
+    Ok(Some(candidates))
+}
+
+/// Log the no-match diagnostic: the candidates we saw and (for the retrying
+/// path) how long we waited. If the speaker is absent it's a timing problem
+/// (the BT connect notification beat the audio device showing up); if it's
+/// present but unmatched, neither its UID nor its name lined up.
+fn log_no_match(target_hex: &str, bt_name: &str, candidates: &[String], waited: Option<Duration>) {
+    let waited = match waited {
+        Some(d) => format!(" after {}s", d.as_secs()),
+        None => String::new(),
+    };
+    eprintln!(
+        "speaker-core: force-default-output found no output device matching \
+         mac={target_hex:?} name={bt_name:?}{waited}; saw {} output device(s): [{}]",
+        candidates.len(),
+        candidates.join(", ")
+    );
 }
 
 #[cfg(test)]
@@ -329,5 +443,21 @@ mod tests {
     #[test]
     fn empty_target_does_not_match() {
         assert!(!uid_matches("anything", ""));
+    }
+
+    #[test]
+    fn name_match_is_case_insensitive_and_substring_either_way() {
+        // The SRS-XB100 case: UUID-style UID, so the MAC never matches the
+        // UID and the name is the only correlation.
+        assert!(name_matches("SRS-XB100", "SRS-XB100"));
+        assert!(name_matches("srs-xb100", "SRS-XB100"));
+        // Suffixes on either side still match.
+        assert!(name_matches("SRS-XB100", "SRS-XB100 (Stereo)"));
+        assert!(name_matches("SRS-XB100 - Hands-Free", "SRS-XB100"));
+        // Unrelated devices don't.
+        assert!(!name_matches("MacBook Pro Speakers", "SRS-XB100"));
+        // Empty names never match.
+        assert!(!name_matches("", "SRS-XB100"));
+        assert!(!name_matches("SRS-XB100", ""));
     }
 }
