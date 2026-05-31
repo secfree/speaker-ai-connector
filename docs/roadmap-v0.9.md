@@ -44,10 +44,10 @@ shape, same integer FFI setter convention. See
 The one place selectors live. Bundled, not fetched. See
 [design — selector recipe file](design-browser-tab-voice-mode.md#selector-recipe-file).
 
-- [todo] Add `shells/macos/Resources/voice-selectors.json` with the `{ version, providers: { <Provider>: { match_url, probe, click } } }` shape from the design. Seed `ChatGPT` (and `Gemini` if a stable selector is known); leave `Claude` out until Anthropic ships voice; `Custom` has no entry by design (toggle is a no-op for Custom).
-- [todo] Bundle the file into `SpeakerAIConnector.app/Contents/Resources/` via `project.yml` (same mechanism as the Silero `.onnx` bundling) and confirm it lands in the built app.
-- [todo] A small Swift loader (`VoiceSelectors`) that reads + decodes the JSON once, keyed by `BrowserProvider`. A missing/malformed file is a clean "no recipe" result — never a crash; auto-click just falls back to manual.
-- [todo] Unit-decode test for the JSON shape (the file is the contract); a malformed file decodes to "no recipes" rather than throwing.
+- [done] Add `shells/macos/Resources/voice-selectors.json` with the `{ version, providers: { <Provider>: { match_url, probe, click } } }` shape from the design. Seeds `ChatGPT` only — no stable `Gemini` voice-button selector is known, so it stays out alongside `Claude` (Anthropic voice not shipped); `Custom` has no entry by design (toggle is a no-op for Custom).
+- [done] Bundle the file into `SpeakerAIConnector.app/Contents/Resources/` via `project.yml` (same `buildPhase: resources` mechanism as the Silero `.onnx`). Verified it lands in the built app next to `silero_vad.onnx`.
+- [done] A small Swift loader (`VoiceSelectors` + `VoiceSelectorsLoader`, [VoiceSelectors.swift](../shells/macos/Sources/Core/VoiceSelectors.swift)) reads + decodes the JSON once from `Bundle.main`. Kept pure-Foundation (no FFI/`BrowserProvider` ref) so it compiles into a standalone logic-test bundle; the `BrowserProvider`-keyed convenience lives in [VoiceSelectors+BrowserProvider.swift](../shells/macos/Sources/Core/VoiceSelectors+BrowserProvider.swift). A missing/malformed file returns `.empty` ("no recipes") — never a crash.
+- [done] Unit-decode tests ([VoiceSelectorsTests.swift](../shells/macos/Tests/VoiceSelectorsTests.swift)) pin the well-formed shape, unseeded providers (`Custom`/`Claude`) returning `nil`, malformed + wrong-typed JSON decoding to `.empty` rather than throwing, and the shipped file matching the contract. First Swift test target: a host-less `bundle.unit-test` run via `xcodebuild test -scheme SpeakerAIConnectorTests` (no signing, no Rust prebuild). 5/5 pass.
 
 ## N3 — Default-browser detection + AppleScript JS-eval runner (shell)
 

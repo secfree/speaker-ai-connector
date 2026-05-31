@@ -28,6 +28,10 @@ targets:
       # the .onnx weights end up in Contents/Resources/.
       - path: Resources/silero_vad.onnx
         buildPhase: resources
+      # v0.9 N2: ship the Stage B selector recipes so auto-click has its
+      # bundled (not fetched) contract in Contents/Resources/.
+      - path: Resources/voice-selectors.json
+        buildPhase: resources
     preBuildScripts:
       - name: Build Rust core
         basedOnDependencyAnalysis: false
@@ -95,3 +99,35 @@ targets:
         Release:
           LIBRARY_SEARCH_PATHS:
             - $(SRCROOT)/../../core/target/release
+
+  # v0.9 N2: first Swift test target. A standalone logic-test bundle (no
+  # app host, no FFI/Rust linkage) that compiles only the pure-Foundation
+  # selector loader so the JSON-contract tests run headlessly via
+  # `xcodebuild test` without code signing. See VoiceSelectorsTests.swift.
+  SpeakerAIConnectorTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+      - path: Sources/Core/VoiceSelectors.swift
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.secfree.SpeakerAIConnectorTests
+        CODE_SIGNING_ALLOWED: NO
+
+schemes:
+  SpeakerAIConnector:
+    build:
+      targets:
+        SpeakerAIConnector: all
+  # Tests-only scheme: builds and runs just the standalone logic-test
+  # bundle, so `xcodebuild test -scheme SpeakerAIConnectorTests` skips the
+  # Rust prebuild and the (signing-gated) app host entirely.
+  SpeakerAIConnectorTests:
+    build:
+      targets:
+        SpeakerAIConnectorTests: [test]
+    test:
+      targets:
+        - SpeakerAIConnectorTests

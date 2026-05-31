@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "providers": {
+    "ChatGPT": {
+      "match_url": "chatgpt.com",
+      "probe": "document.querySelector('[data-testid=\"composer-speech-button\"]')",
+      "click": "document.querySelector('[data-testid=\"composer-speech-button\"]').click()"
+    }
+  }
+}
