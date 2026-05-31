@@ -106,12 +106,18 @@ final class BrowserScriptRunner {
         /// TCC Automation permission was denied for the browser.
         case automationDenied(browserName: String)
 
-        /// The menu-bar string the caller shows. N3 routes every failure
-        /// through the one manual-fallback message; N5 refines
-        /// `automationDenied` to point at System Settings ▸ Privacy &
-        /// Security ▸ Automation (the entitlement and copy land there too).
+        /// The menu-bar string the caller shows. Most failures route through
+        /// the one manual-fallback message; `automationDenied` is refined
+        /// (N5) to point at System Settings ▸ Privacy & Security ▸ Automation,
+        /// since silent failure on a denied Automation prompt is the design's
+        /// biggest Stage-B UX risk.
         var menuMessage: String {
-            "Couldn't start voice automatically — tap the voice button in the browser"
+            switch self {
+            case .automationDenied:
+                return "Allow Automation for Speaker AI Connector in System Settings ▸ Privacy & Security ▸ Automation, then reconnect — or tap the voice button yourself"
+            case .unsupportedBrowser, .probeTimedOut, .evalFailed:
+                return "Couldn't start voice automatically — tap the voice button in the browser"
+            }
         }
     }
 

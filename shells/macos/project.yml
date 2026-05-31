@@ -63,6 +63,11 @@ targets:
         NSHumanReadableCopyright: ""
         NSBluetoothAlwaysUsageDescription: "Speaker AI Connector watches for your chosen Bluetooth speaker connecting so it can start an AI voice session automatically."
         NSMicrophoneUsageDescription: "Speaker AI Connector captures audio from the Bluetooth speaker's microphone and streams it to the AI service."
+        # v0.9 N5: Stage-B auto-click drives the default browser via Apple
+        # Events to click the provider's voice button. macOS shows this string
+        # in the Automation consent prompt. Off by default; only used when the
+        # auto-click toggle is on.
+        NSAppleEventsUsageDescription: "Speaker AI Connector controls your browser to click the voice button automatically when you enable auto-click in Settings."
     entitlements:
       path: Sources/App/SpeakerAIConnector.entitlements
       properties:
@@ -70,6 +75,11 @@ targets:
         com.apple.security.device.bluetooth: true
         com.apple.security.device.audio-input: true
         com.apple.security.network.client: true
+        # v0.9 N5: Stage-B auto-click sends Apple Events to the default
+        # browser. A sandboxed app can't send Apple Events at all without
+        # this entitlement — `NSAppleEventsUsageDescription` only supplies the
+        # TCC prompt text. Both are required for the toggle to function.
+        com.apple.security.automation.apple-events: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.secfree.SpeakerAIConnector

@@ -24,6 +24,8 @@
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
 	<true/>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Speaker AI Connector controls your browser to click the voice button automatically when you enable auto-click in Settings.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Speaker AI Connector watches for your chosen Bluetooth speaker connecting so it can start an AI voice session automatically.</string>
 	<key>NSHumanReadableCopyright</key>

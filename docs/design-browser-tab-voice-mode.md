@@ -314,9 +314,14 @@ hot-fetching the file if Stage B sees real usage.
 #### Permissions
 
 Stage B needs the **Automation** entitlement — sending Apple Events to
-another app. Add `NSAppleEventsUsageDescription` to the Info.plist
+another app. This is **two** things, both required (N5): add
+`NSAppleEventsUsageDescription` to the Info.plist
 ([project.yml:60](../shells/macos/project.yml) is where the Stage-A usage
-keys live). First auto-click triggers the macOS TCC Automation prompt
+keys live) *and* the `com.apple.security.automation.apple-events` sandbox
+entitlement. The app is sandboxed (`com.apple.security.app-sandbox`), so the
+usage description alone is not enough — it only supplies the TCC prompt text;
+without the sandbox entitlement a sandboxed app can't send Apple Events at
+all. First auto-click triggers the macOS TCC Automation prompt
 ("Speaker AI Connector wants to control Safari"); a denial is a permanent
 silent failure until the user flips it in System Settings ▸ Privacy &
 Security ▸ Automation — surface that as a specific menu-bar message, the

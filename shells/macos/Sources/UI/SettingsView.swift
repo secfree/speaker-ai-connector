@@ -331,6 +331,33 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+
+        // Auto-click only makes sense for a seeded provider — Custom has no
+        // bundled selector recipe, so the toggle is hidden there (it would be
+        // a silent no-op). v0.9 N5.
+        if coordinator.browserProvider != .custom {
+            autoClickSection
+        }
+    }
+
+    /// Stage-B opt-in: after opening the tab, click the provider's voice
+    /// button automatically. Off by default and fragile by nature, so the
+    /// section sets expectations up front: the manual per-browser setting it
+    /// needs, and the Automation prompt macOS will raise. v0.9 N5.
+    @ViewBuilder
+    private var autoClickSection: some View {
+        Section("Auto-click") {
+            Toggle("Auto-click voice button", isOn: $coordinator.autoClickVoice)
+            Text("Auto-click the voice button (may break when the site updates).")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("You must enable **Allow JavaScript from Apple Events** in your browser (Safari: Develop menu; Chrome: View ▸ Developer) for this to work.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("macOS will ask permission for Speaker AI Connector to control your browser the first time.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder

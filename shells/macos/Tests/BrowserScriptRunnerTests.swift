@@ -95,12 +95,24 @@ final class BrowserScriptRunnerTests: XCTestCase {
 
     // MARK: - Failure messages
 
-    func testAllFailuresShareTheManualFallbackMessage() {
+    func testNonPermissionFailuresShareTheManualFallbackMessage() {
         let expected = "Couldn't start voice automatically — tap the voice button in the browser"
         XCTAssertEqual(BrowserScriptRunner.Failure.unsupportedBrowser(name: "Firefox").menuMessage, expected)
         XCTAssertEqual(BrowserScriptRunner.Failure.probeTimedOut.menuMessage, expected)
         XCTAssertEqual(BrowserScriptRunner.Failure.evalFailed("boom").menuMessage, expected)
-        XCTAssertEqual(BrowserScriptRunner.Failure.automationDenied(browserName: "Safari").menuMessage, expected)
+    }
+
+    /// N5: a denied Automation prompt is the design's biggest Stage-B UX risk,
+    /// so its message points the user at the exact System Settings pane rather
+    /// than the generic manual-fallback line.
+    func testAutomationDeniedPointsAtSystemSettings() {
+        let message = BrowserScriptRunner.Failure.automationDenied(browserName: "Safari").menuMessage
+        XCTAssertNotEqual(
+            message,
+            "Couldn't start voice automatically — tap the voice button in the browser"
+        )
+        XCTAssertTrue(message.contains("System Settings"))
+        XCTAssertTrue(message.contains("Automation"))
     }
 
     // MARK: - Poll loop (injected evaluator, no browser)

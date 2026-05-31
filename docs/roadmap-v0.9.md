@@ -74,10 +74,10 @@ Expose the toggle, set expectations, and add the entitlement. See
 [design — permissions](design-browser-tab-voice-mode.md#permissions-1) and
 [design — Stage-B-specific risks](design-browser-tab-voice-mode.md#stage-b-specific-risks).
 
-- [todo] In `browserSection` of `SettingsView` ([SettingsView.swift](../shells/macos/Sources/UI/SettingsView.swift)), add an "Auto-click voice button" toggle, shown only when the Browser responder is selected and the provider is non-`Custom`. Off by default. Bound to `coordinator.autoClickVoice` (N4).
-- [todo] Toggle copy: "Auto-click the voice button (may break when the site updates)." Plus the manual-browser-setting walkthrough: "You must enable **Allow JavaScript from Apple Events** in your browser (Safari: Develop menu; Chrome: View ▸ Developer) for this to work." Plus the Automation note: "macOS will ask permission for Speaker AI Connector to control your browser the first time."
-- [todo] Add `NSAppleEventsUsageDescription` to the Info.plist via `project.yml` ([project.yml:60](../shells/macos/project.yml), where the Stage-A usage keys live). Confirm it lands in the built `Info.plist`.
-- [todo] When auto-click fails because Automation was denied, the menu-bar message (N3) should point the user at System Settings ▸ Privacy & Security ▸ Automation — silent failure is the design's biggest UX risk.
+- [done] In `browserSection` of `SettingsView` ([SettingsView.swift](../shells/macos/Sources/UI/SettingsView.swift)), an "Auto-click voice button" toggle in its own `autoClickSection`, rendered only when the Browser responder is selected and `browserProvider != .custom`. Off by default. Bound to `coordinator.autoClickVoice` (N4).
+- [done] Toggle copy: "Auto-click the voice button (may break when the site updates)." Plus the manual-browser-setting walkthrough: "You must enable **Allow JavaScript from Apple Events** in your browser (Safari: Develop menu; Chrome: View ▸ Developer) for this to work." Plus the Automation note: "macOS will ask permission for Speaker AI Connector to control your browser the first time."
+- [done] Added `NSAppleEventsUsageDescription` to the Info.plist via `project.yml`, alongside the Stage-A usage keys. **Plus** the `com.apple.security.automation.apple-events` entitlement — the app is sandboxed, and a sandboxed app can't send Apple Events at all without it (the usage description only supplies the TCC prompt text); both are required for the toggle to function. Confirmed both land in the built `Info.plist` / `.entitlements`.
+- [done] `BrowserScriptRunner.Failure.menuMessage` (N3) now branches: `automationDenied` points the user at System Settings ▸ Privacy & Security ▸ Automation; the other failures keep the generic manual-fallback line. Test updated ([BrowserScriptRunnerTests.swift](../shells/macos/Tests/BrowserScriptRunnerTests.swift)) — 22/22 pass. App builds (`xcodebuild … CODE_SIGNING_ALLOWED=NO`).
 
 ## N6 — Verify on hardware / per browser
 
