@@ -240,21 +240,105 @@ browser-automation surface.
 
 For users willing to trade fragility for one fewer click. Lives **entirely
 in the macOS shell** — the Rust core does not learn anything about
-selectors.
+selectors. Tracked in [roadmap-v0.9.md](roadmap-v0.9.md).
 
-- A small JSON file in `shells/macos/Resources/` mapping provider →
-  AppleScript snippet → JS selector(s) for the voice button.
-- A Settings toggle: "Auto-click voice button (may break when the site
-  updates)" — off by default.
-- When on, after opening the URL the shell sleeps briefly, then runs the
-  matching AppleScript through `osascript` / `NSAppleScript` against the
-  default browser. Failures are logged to `last_error` and surfaced as the
-  same kind of menu-bar message we use for Gemini auth failures.
-- The JSON file is bundled, not fetched. A site change means a release.
-  We can revisit hot-fetch if Stage B sees real usage.
+The split that keeps Stage B from leaking into the core: the core knows
+exactly one new bit of state — a boolean `auto_click_voice` toggle,
+persisted in `Settings` and crossed over FFI as an integer the same way
+`force_default_output` is ([config.rs:170](../core/speaker-core/src/config.rs),
+[ffi.rs:918](../core/speaker-core/src/ffi.rs)). Everything that knows what a
+"voice button" is — selectors, AppleScript, per-browser dialects, timing —
+lives in the shell. The core never sees a selector string.
 
-Stage B is **not** part of the initial scope for this design. It's listed
-so the Stage-A shape doesn't accidentally box it out.
+#### Mechanism
+
+When `auto_click_voice` is on, after the shell opens the tab (the existing
+`handleOpenBrowser` path, [Coordinator.swift:1109](../shells/macos/Sources/Core/Coordinator.swift))
+it runs a click sequence against the **default browser**:
+
+1. **Resolve the default browser.** `NSWorkspace.shared.urlForApplication(toOpen:)`
+   on the resolved URL → bundle id (`com.apple.Safari`,
+   `com.google.Chrome`, `com.microsoft.edgemac`, …). The bundle id selects
+   the AppleScript dialect; an unsupported browser is a clean "auto-click
+   not supported for <browser>" failure, not a crash.
+2. **Look up the selector recipe** for `(provider, browser)` from a bundled
+   JSON file (below). No entry → fail clean and fall back to manual (the tab
+   is already open, so the user just clicks once).
+3. **Poll for the element, then click.** A fixed `sleep` races page load, so
+   the shell instead evaluates a small JS probe (`document.querySelector(sel)
+   != null`) on a short interval (e.g. every 500 ms up to ~15 s). When the
+   element appears, evaluate the click JS. Both run through the browser's
+   AppleScript JS-eval verb.
+4. **On failure** (timeout, eval error, automation denied) log to
+   `last_error` and surface the same kind of menu-bar message used for
+   Gemini auth failures ("Couldn't start voice automatically — tap the voice
+   button in the browser").
+
+#### Per-browser AppleScript dialects
+
+The JS-eval verb differs by browser, so the recipe is keyed by bundle id:
+
+| Browser | JS-eval AppleScript | Extra user setup |
+|---|---|---|
+| Safari | `tell application "Safari" to do JavaScript jsSrc in document 1` | **Develop ▸ Allow JavaScript from Apple Events** must be enabled — a manual, one-time user step with no programmatic override. Settings copy must call this out. |
+| Chrome / Edge | `tell application "Google Chrome" to execute javascript jsSrc in active tab of window 1` | **View ▸ Developer ▸ Allow JavaScript from Apple Events** (Chrome) / equivalent (Edge). Same manual one-time step. |
+
+`document 1` / `active tab of window 1` assumes the tab we just opened is
+frontmost. It usually is (we just opened it), but a user racing to another
+tab can break it — accepted Stage-B fragility, logged not retried.
+
+#### Selector recipe file
+
+A bundled `shells/macos/Resources/voice-selectors.json`, **not fetched** —
+a site change means a release. Shape:
+
+```json
+{
+  "version": 1,
+  "providers": {
+    "ChatGPT": {
+      "match_url": "chatgpt.com",
+      "probe": "document.querySelector('[data-testid=\"composer-speech-button\"]')",
+      "click": "document.querySelector('[data-testid=\"composer-speech-button\"]').click()"
+    }
+  }
+}
+```
+
+Selectors are best-effort and *expected* to drift; the file is the one place
+a fix lands, and the toggle's own copy sets the expectation ("may break when
+the site updates"). `Custom` provider has no entry, so the toggle is a no-op
+for `Custom` URLs — the tab still opens, nothing is clicked. We can revisit
+hot-fetching the file if Stage B sees real usage.
+
+#### Permissions
+
+Stage B needs the **Automation** entitlement — sending Apple Events to
+another app. Add `NSAppleEventsUsageDescription` to the Info.plist
+([project.yml:60](../shells/macos/project.yml) is where the Stage-A usage
+keys live). First auto-click triggers the macOS TCC Automation prompt
+("Speaker AI Connector wants to control Safari"); a denial is a permanent
+silent failure until the user flips it in System Settings ▸ Privacy &
+Security ▸ Automation — surface that as a specific menu-bar message, the
+same way the design treats every other permission as a user-visible failure
+mode.
+
+#### Stage-B-specific risks
+
+1. **Selector drift** — the original reason Phase 3 was deferred. Boxed in:
+   bundled file, one release to fix, off by default, honest copy.
+2. **"Allow JavaScript from Apple Events" is a manual browser setting** with
+   no API to enable it. Without it, every `do JavaScript` / `execute
+   javascript` fails. The Settings copy must walk the user through enabling
+   it per browser; detection is best-effort (the first eval just fails).
+3. **TCC Automation denial** → silent failure. Surface explicitly.
+4. **Frontmost-tab assumption** (`document 1` / `active tab of window 1`).
+5. **Timing** — handled by the poll-for-element loop rather than a fixed
+   sleep, but a very slow load can still time out.
+
+Stage B is **not** part of the Stage-A scope. It's listed so the Stage-A
+shape doesn't accidentally box it out; the toggle, the JSON file, and the
+Automation entitlement are all additive.
 
 ## `AIServiceProfile` vs. `Responder`
 
