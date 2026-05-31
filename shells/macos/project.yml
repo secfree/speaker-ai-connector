@@ -110,6 +110,9 @@ targets:
     sources:
       - path: Tests
       - path: Sources/Core/VoiceSelectors.swift
+      # v0.9 N3: the auto-click runner. Pure of FFI/BrowserProvider, so its
+      # dialect/escaping/poll-loop logic compiles into the host-less bundle.
+      - path: Sources/Core/BrowserScriptRunner.swift
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
