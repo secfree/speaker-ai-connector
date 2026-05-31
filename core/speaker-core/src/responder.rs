@@ -15,7 +15,7 @@
 //! (so input clips still record via `SessionRecorder`) and never produces
 //! output events, so the audio layer never opens an output clip.
 //!
-//! Roadmap reference: docs/roadmap-v0.2.md N3.
+//! See the `Responder` seam in docs/design.md (landed in v0.2).
 //!
 //! NOTE: the responder is captured at `audio::start_session` time. A
 //! settings change while a session is in flight does not affect the

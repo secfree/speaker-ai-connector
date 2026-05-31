@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-v0.1 (M1–M6) is shipped: Rust core, macOS Bluetooth watcher, `cpal` audio capture + playback, VAD relay (WebRTC + Silero, Silero default since v0.3), Gemini Live WebSocket client with Keychain-backed API key, hand-written C ABI FFI, persisted TOML config, `SMAppService` login item, full Coordinator state machine driven from the shell, and per-session recordings browsable in a Sessions window. v0.2 added session delete, a live dialogue window for manual sessions, and a pluggable responder (Gemini / Nope). v0.3 added the Silero VAD engine behind a `Vad` seam and made it the default. v0.4 added an auto-session-on-BT-connect toggle and date-grouped sessions. **M7 on-hardware polish is the remaining v0.1 milestone** — most of its tasks are still `todo` in [docs/roadmap-v0.1.md](docs/roadmap-v0.1.md). No `.xcodeproj` is checked in — `make build` (or `xcodegen generate` inside `shells/macos/`) produces it. [docs/design-v0.1.md](docs/design-v0.1.md) is the source of truth for scope and architecture; read it before making non-trivial changes, and check the `docs/roadmap-v0.*.md` files for execution state.
+v0.1 (M1–M6) is shipped: Rust core, macOS Bluetooth watcher, `cpal` audio capture + playback, VAD relay (WebRTC + Silero, Silero default since v0.3), Gemini Live WebSocket client with Keychain-backed API key, hand-written C ABI FFI, persisted TOML config, `SMAppService` login item, full Coordinator state machine driven from the shell, and per-session recordings browsable in a Sessions window. v0.2 added session delete, a live dialogue window for manual sessions, and a pluggable responder (Gemini / Nope). v0.3 added the Silero VAD engine behind a `Vad` seam and made it the default. v0.4 added an auto-session-on-BT-connect toggle and date-grouped sessions. **v0.1 (M1–M7) is fully shipped**, including M7 on-hardware polish. No `.xcodeproj` is checked in — `make build` (or `xcodegen generate` inside `shells/macos/`) produces it. [docs/design.md](docs/design.md) is the source of truth for scope and architecture; read it before making non-trivial changes.
 
 ## Project
 
@@ -16,7 +16,7 @@ The design supports macOS and Windows, but **v0.1 ships macOS only**. The Window
 
 ### v1 path: Gemini Live (no browser)
 
-The design's [roadmap](docs/design-v0.1.md#roadmap) makes **Gemini Live the primary v1 path**. The Mac captures audio from the speaker's HFP mic, streams it to Gemini Live over a WebSocket, and plays the response audio back through the speaker. A local VAD (Silero by default, WebRTC via `libfvad` as a no-model fallback) gates uploads so silence costs nothing. No browser, no selectors, no cookies.
+The design's [roadmap](docs/design.md#roadmap) makes **Gemini Live the primary v1 path**. The Mac captures audio from the speaker's HFP mic, streams it to Gemini Live over a WebSocket, and plays the response audio back through the speaker. A local VAD (Silero by default, WebRTC via `libfvad` as a no-model fallback) gates uploads so silence costs nothing. No browser, no selectors, no cookies.
 
 The older browser-automation path (open `chatgpt.com` in Safari, click the voice button via injected JS) is now **Phase 3** in the design and is deferred indefinitely — Anthropic not shipping a realtime voice API is the only remaining reason to keep it on the map.
 
@@ -89,7 +89,7 @@ The `AIServiceProfile` abstraction stays — v0.1 ships `GeminiLive { model }` a
 - **Surface session failures explicitly.** When Gemini Live errors out, show a specific menu-bar message (`"No API key — open Settings"`, `"Gemini auth failed — check API key"`, `"Network error — will retry on next connect"`) rather than retrying silently. The Rust error carries a human-readable `message()`; the Swift Coordinator falls back to a hard-coded mapping by error code.
 - **Costs are gated by VAD plus an optional daily cap.** The relay only uploads when speech is detected (the primary control), and a per-day input-clip cap in `daily_cap.rs` is available as a belt-and-braces ceiling — `Settings::daily_input_clip_cap == 0` means unlimited (the default). Issue #9.
 - **Keep the FFI boundary small.** Every leaky type costs twice once Windows lands. The shape is `BTEvent` enum in, `SessionCommand` in, `StatusEvent` snapshot out (JSON, revision-counted), plus typed config accessors. No streaming, no callbacks for PCM, no opaque pointers if a value type fits.
-- **CLAUDE.md is for agents, not users.** User-facing status lives in the README. Roadmap state lives in `docs/roadmap-v0.*.md`. Keep this file focused on what an incoming Claude session needs to know to work in the repo.
+- **CLAUDE.md is for agents, not users.** User-facing status lives in the README; architecture and resolved decisions live in `docs/design.md`. Keep this file focused on what an incoming Claude session needs to know to work in the repo.
 
 ## Explicit non-goals
 
@@ -120,23 +120,21 @@ Resolved since the original design:
 
 ## Milestones (v0.1 = Phase 1, macOS only)
 
-v0.1 milestones (see [docs/roadmap-v0.1.md](docs/roadmap-v0.1.md) for task-level state):
+v0.1 (M1–M7) is fully shipped. The per-milestone roadmap files were retired once complete; the resolutions live in [docs/design.md](docs/design.md).
 
-- **M1** — Rust core skeleton + macOS Bluetooth watcher. *(done)*
-- **M2** — Audio capture + playback round-trip via `cpal`. *(done)*
-- **M3** — VAD relay using `libfvad`. *(done)*
-- **M4** — Session recording + sessions browser. *(done — note: scope was reshuffled from the original design; the Gemini Live client landed in M5, and session history was promoted out of M6.)*
-- **M5** — Gemini Live WebSocket client + API key in Keychain. *(done)*
-- **M6** — Real FFI surface + Coordinator wiring + persistence + login item. *(done)*
-- **M7** — On-hardware polish (force-default-output default, VAD tuning, HFP quality verification, tested-speakers doc, sideload-ready signed/notarized build). *(in progress — most tasks still `todo`)*
+- **M1** — Rust core skeleton + macOS Bluetooth watcher.
+- **M2** — Audio capture + playback round-trip via `cpal`.
+- **M3** — VAD relay using `libfvad`.
+- **M4** — Session recording + sessions browser. *(scope was reshuffled from the original design; the Gemini Live client landed in M5, and session history was promoted out of M6.)*
+- **M5** — Gemini Live WebSocket client + API key in Keychain.
+- **M6** — Real FFI surface + Coordinator wiring + persistence + login item.
+- **M7** — On-hardware polish (force-default-output default, VAD tuning, HFP quality verification, tested-speakers doc, sideload-ready signed/notarized build).
 
-Post-v0.1 work that has already landed (see the matching roadmap files):
+Post-v0.1 work that has also landed:
 
-- **v0.2** ([docs/roadmap-v0.2.md](docs/roadmap-v0.2.md)) — session delete, manual-session dialogue window, pluggable responder (Gemini / Nope).
-- **v0.3** ([docs/roadmap-v0.3.md](docs/roadmap-v0.3.md)) — pluggable VAD engine seam + Silero engine, Silero set as the default.
-- **v0.4** ([docs/roadmap-v0.4.md](docs/roadmap-v0.4.md)) — auto-session-on-BT-connect toggle, date-grouped Sessions window.
-
-When picking up work, identify which roadmap file the task belongs in before starting.
+- **v0.2** — session delete, manual-session dialogue window, pluggable responder (Gemini / Nope).
+- **v0.3** — pluggable VAD engine seam + Silero engine, Silero set as the default.
+- **v0.4** — auto-session-on-BT-connect toggle, date-grouped Sessions window.
 
 ## Build
 

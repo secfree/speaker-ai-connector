@@ -7,7 +7,7 @@ that surface as a single ugly log line ("NoActiveClip", "Precondition check
 failed", "session ended") are an interaction across two or three of these
 pieces, not a defect in one of them.
 
-It is intentionally narrower than [design-v0.1.md](design-v0.1.md): that doc
+It is intentionally narrower than [design.md](design.md): that doc
 covers product scope and architectural choices, this one is the mechanism, the
 invariants, and the log catalogue.
 

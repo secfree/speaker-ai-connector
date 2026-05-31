@@ -1,6 +1,6 @@
 //! Session recording — disk-backed history of every input/output clip.
 //!
-//! On-disk layout (per [docs/v0.1-design.md] §7):
+//! On-disk layout (per [docs/design.md] §7):
 //!
 //! ```text
 //! <data-dir>/sessions/<id>/

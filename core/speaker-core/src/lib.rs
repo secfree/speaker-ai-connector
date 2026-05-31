@@ -5,7 +5,7 @@
 //! config persistence (M5). The platform shells (macOS first, Windows
 //! later) push `BTEvent`s in and render `StatusEvent`s out.
 //!
-//! See `docs/v0.1-design.md` for the architecture.
+//! See `docs/design.md` for the architecture.
 
 pub mod coordinator;
 pub mod ffi;

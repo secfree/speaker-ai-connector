@@ -95,7 +95,7 @@ pub const DEFAULT_GREETING_PROMPT: &str =
 /// This is the only safety lever the Live API gives us — `safetySettings`
 /// is a REST-only field and `BidiGenerateContentSetup` rejects it. Hard
 /// thresholds therefore fall back to Gemini's built-in defaults; see
-/// `docs/v0.1-design.md` for the trade-off.
+/// `docs/design.md` for the trade-off.
 fn build_system_instruction(main: &str, alternative: Option<&str>) -> String {
     let language_clause = match alternative {
         Some(alt) if !alt.is_empty() && alt != main => format!(

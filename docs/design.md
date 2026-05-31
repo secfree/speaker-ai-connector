@@ -89,11 +89,16 @@ The shell pushes normalized `BTEvent { connected, address, name }` values into t
 
 Force-default-output helper (set the OS default output device to the speaker on connect) is needed on some macOS configurations and probably some Windows ones too — implemented in small platform-specific Rust modules (`coreaudio-rs` on macOS, `windows`/WASAPI on Windows) and gated by a settings toggle.
 
-#### 3. VAD relay (Rust core, via `libfvad`)
+#### 3. VAD relay (Rust core)
 
-Wraps `libfvad` (the maintained WebRTC VAD fork). Gates the upload stream: silence forwards no frames, speech opens the gate with a small pre-roll, sustained silence closes it. This is the turn-taking signal — no wake word, no push-to-talk — and it is also the cost gate (a left-on speaker accrues no API spend during silence).
+Gates the upload stream: silence forwards no frames, speech opens the gate with a small pre-roll, sustained silence closes it. This is the turn-taking signal — no wake word, no push-to-talk — and it is also the cost gate (a left-on speaker accrues no API spend during silence).
 
-Single binding in the core, identical on both platforms.
+The engine sits behind a `Vad` seam (enum dispatch, `VadEngine::{WebRtc, Silero}`) chosen over `dyn Vad` because per-frame call cost matters at 16 kHz and the audio callback's `Send` constraints complicate trait objects. A shared `Gate` (pre-roll + hangover) sits in front of the engine; the engine only returns a per-frame `is_voice: bool`, so the gating logic is implemented once for both backends.
+
+- **WebRTC** (`fvad` crate / `libfvad`) — no model to ship, four aggressiveness levels, runs on 10/20/30 ms frames of 8/16 kHz mono PCM. The no-model fallback.
+- **Silero** (`ort` + bundled `silero_vad.onnx` v5, behind the `silero` cargo feature) — small neural VAD (~2 MB), more robust to noise and speaker bleed-through. Outputs a probability per 512-sample window with hysteresis (open at the threshold, stay open until threshold − 0.15) to avoid chattering. **The default since v0.3** — real-room testing on the target speaker showed WebRTC `VeryAggressive` leaks short noise clips that Silero rejects. The shell passes the bundled model path to the core over FFI at startup; model loading happens once at engine construction, never in the audio callback.
+
+The user picks the engine (and per-engine tuning) in Settings. For headless / CI builds without the ONNX runtime, `cargo build --no-default-features` drops the `silero` feature and the WebRTC engine still works.
 
 #### 4. Gemini Live client (Rust core)
 
@@ -112,7 +117,7 @@ If real kid-voice testing in M7 shows the built-in defaults are too permissive (
 
 State machine: `Idle → Launching → SessionActive → TearingDown → Idle`. Driven by two input event kinds from the shell:
 
-- `BTEvent { connected, address, name }` — Bluetooth connect/disconnect for the configured target speaker (the primary trigger).
+- `BTEvent { connected, address, name }` — Bluetooth connect/disconnect for the configured target speaker (the primary trigger). Honoring a connect is gated by the `auto_session_on_bt_connect` setting (default `true`): when it is `false` the connect is logged and ignored so the speaker can be used for music without burning API credits. The flag is read at event time, so flipping it from the menu bar takes effect on the next connect; a session already in flight is never preempted by the toggle.
 - `SessionCommand::{Start, Stop}` — a manual start/stop from the menu bar, valid only while no target speaker is connected. `Start` is rejected if the coordinator is already in a non-`Idle` state from a Bluetooth-driven session; if a target speaker connects during a manual session, the coordinator tears the manual session down and re-launches against the speaker so the user-visible behavior matches the "speaker connect = fresh session" rule.
 
 The coordinator does not distinguish manual vs. Bluetooth-driven sessions internally beyond that gating — both run the same audio pipeline + Gemini Live session. Manual sessions inherit the OS default input/output (built-in mic and speakers, typically) since no force-default-output redirection happens without a target device. It emits `StatusEvent`s back to the shell for the tray icon and menu text, including a flag indicating whether the active session is manual so the UI can offer a "Stop session" item.
@@ -124,7 +129,7 @@ The coordinator does not distinguish manual vs. Bluetooth-driven sessions intern
 - Windows: WinUI 3 settings window, `NotifyIcon` tray. Same Start/Stop session item.
 
 **Cross-platform config** lives in the Rust core, persisted via a small abstraction:
-- **Non-secret config** (target device address, Gemini model, VAD sensitivity, silence timeout, force-default-output toggle): TOML file under the OS's per-user config directory (`~/Library/Application Support/SpeakerAIConnector/` on macOS, `%APPDATA%\SpeakerAIConnector\` on Windows) via the `directories` crate.
+- **Non-secret config** (target device address, Gemini model, responder choice, VAD engine + per-engine tuning, silence timeout, force-default-output toggle, auto-session-on-BT-connect toggle, start-at-login): TOML file under the OS's per-user config directory (`~/Library/Application Support/SpeakerAIConnector/` on macOS, `%APPDATA%\SpeakerAIConnector\` on Windows) via the `directories` crate. New fields use `#[serde(default)]` so older configs upgrade silently.
 - **API key**: OS credential store — Keychain on macOS, Credential Manager on Windows — via the `keyring` crate.
 - **Autostart**: platform shell — `SMAppService.mainApp.register()` on macOS, a Task Scheduler entry or `Run` registry key on Windows.
 - **Session recordings**: separate from config — see [Session recorder](#7-session-recorder-rust-core) below.
@@ -142,7 +147,12 @@ Persists every input and output audio clip on disk so a parent can review what w
 
 ### `AIServiceProfile` abstraction
 
-Stays as a Rust enum / trait in the core. v0.1 ships one variant — `GeminiLive { model }`. Phase 2 adds `OpenAIRealtime { model }`. The deferred web path becomes `WebBrowser { url, voice_trigger, signed_in_probe }` if it ever ships, and lives entirely in the platform shells (since browser automation is OS-specific anyway).
+Stays as a Rust enum / trait in the core. v0.1 ships one realtime variant — `GeminiLive { model }`. Phase 2 adds `OpenAIRealtime { model }`. The deferred web path becomes `WebBrowser { url, voice_trigger, signed_in_probe }` if it ever ships, and lives entirely in the platform shells (since browser automation is OS-specific anyway).
+
+The thing that actually produces (or doesn't produce) responses sits behind a separate **`Responder` seam** (`ResponderSession`, enum dispatch in `responder.rs`, same rationale as the `Vad` seam). v0.1 ships two responders, selectable in Settings:
+
+- **Gemini** — wraps the Gemini Live client described above.
+- **Nope** — consumes input frames and produces no output. Sessions still record input clips via the recorder, so this exercises the full voice-input path (capture → VAD → recorder) without spending API credits. When `Nope` is selected the API-key field is hidden and the "no API key" gating on the Start-session item is skipped.
 
 ## Permissions required
 
@@ -202,7 +212,7 @@ The original browser-automation path (open `chatgpt.com`/`claude.ai`, click voic
   - **Silero VAD** — small neural VAD (~1–2 MB), more robust to noise and non-speech sounds, runs via ONNX Runtime (cross-platform). Heavier to integrate; worth the cost only if WebRTC misfires in the actual room.
   - **Platform speech APIs** (`SFSpeechRecognizer`, Windows Speech) — full recognizers, not lightweight VADs; using them just for endpointing is overkill and would split the implementation per OS. Not preferred.
 
-  Start with WebRTC VAD; fall back to Silero only if real-room testing shows WebRTC misfires on a child's voice or on speaker bleed-through.
+  ~~Start with WebRTC VAD; fall back to Silero only if real-room testing shows WebRTC misfires on a child's voice or on speaker bleed-through.~~ **Decided in v0.3:** both engines ship behind the `Vad` seam, and **Silero is the default** — real-room testing on the target speaker confirmed WebRTC `VeryAggressive` leaks short noise clips. WebRTC stays selectable as the no-model fallback. See [VAD relay](#3-vad-relay-rust-core).
 
 ## Milestones (v0.1 = Phase 1)
 

@@ -1,6 +1,6 @@
 //! Coordinator state machine + session orchestration.
 //!
-//! The state machine in v0.1-design.md:
+//! The state machine in design.md:
 //!
 //! ```text
 //!   Idle ──BT connect──▶ Launching ──audio + gemini up──▶ SessionActive

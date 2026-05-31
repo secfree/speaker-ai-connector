@@ -20,7 +20,7 @@ Screen-free AI for kids: when a configured Bluetooth speaker connects to your Ma
 - **Force-default-output** toggle for speakers macOS won't route to automatically.
 - **Start at login** via `SMAppService`.
 
-See [docs/design-v0.1.md](docs/design-v0.1.md) for the architecture deep dive, and the `docs/roadmap-v0.*.md` files for where this is going.
+See [docs/design.md](docs/design.md) for the architecture deep dive and where this is going.
 
 ## Hardware requirement
 
@@ -85,9 +85,8 @@ If your speaker doesn't pick up audio automatically, enable **Force default outp
 
 ## Further reading
 
-- [docs/design-v0.1.md](docs/design-v0.1.md) — full architecture and design rationale
+- [docs/design.md](docs/design.md) — full architecture and design rationale
 - [docs/audio-pipeline.md](docs/audio-pipeline.md) — capture/playback details
-- [docs/roadmap-v0.1.md](docs/roadmap-v0.1.md) through [docs/roadmap-v0.4.md](docs/roadmap-v0.4.md) — what's planned
 - [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) — licenses for bundled dependencies (Silero ONNX, etc.)
 
 ## License
